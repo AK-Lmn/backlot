@@ -377,7 +377,7 @@ def _handle(email: str) -> str:
     return email.split("@")[0].replace(".", "")
 
 
-def _user_obj(conn, email: str) -> dict:
+def _user_obj(conn, email: str, caller: Caller) -> dict:
     u = store.get_user(conn, email)
     display = u["display_name"] if u else email.split("@")[0]
     parts = display.split()
@@ -387,30 +387,19 @@ def _user_obj(conn, email: str) -> dict:
     is_bot = email == SERVICE_EMAIL or (not u and email.split("@")[0].endswith("bot"))
     # A roster entry's `deactivated: true`. Measured against a live workspace on 2026-09-17:
     # `deleted` is present on all 19 members and true on the 9 deactivated ones, so it is served
-    # unconditionally where Slack's reference allows either ("Otherwise the value is false, or the
-    # field may not appear at all"). `is_forgotten` is a different state, not a spelling of this
-    # one: the same reference gives it as "Whether the user has been GDPR-forgotten" and Slack's
-    # OpenAPI declares it a boolean, and on that workspace 5 of the 9 carried it against 0 of the
-    # 10 active. A roster states no GDPR erasure, so there is nothing here to derive it from.
+    # unconditionally where docs.slack.dev's user object allows either ("Otherwise the value is
+    # false, or the field may not appear at all"). `is_forgotten` is a different state, not a
+    # spelling of this one: the same page types it Boolean and gives it as "Whether the user has
+    # been GDPR-forgotten", and on that workspace 5 of the 9 carried it against 0 of the 10
+    # active. A roster states no GDPR erasure, so there is nothing here to derive it from.
     deactivated = bool(u) and store.slack_is_deactivated(conn, email)
-    return {
+    obj = {
         "id": _uid(email),
         "team_id": TEAM_ID,
         "name": _handle(email),
-        "real_name": display,
         "deleted": deactivated,
         "is_bot": is_bot,
         "is_app_user": is_bot,
-        "is_admin": False,
-        "is_owner": False,
-        "is_primary_owner": False,
-        "is_restricted": False,
-        "is_ultra_restricted": False,
-        "has_2fa": False,
-        "tz": "America/Los_Angeles",
-        "tz_label": "Pacific Time",
-        "tz_offset": -28800,
-        "color": synth._digest(email)[:6],
         "updated": updated,
         "profile": {
             "real_name": display,
@@ -428,6 +417,37 @@ def _user_obj(conn, email: str) -> dict:
             "avatar_hash": synth._digest(email)[:12],
         },
     }
+    # Measured live against a real workspace, 2026-09-21 (`users.list`, `users.info`): a
+    # deactivated member drops `real_name`, `color`, the admin/ownership/restriction flags and the
+    # tz fields entirely — not `false`/empty, absent. All 9 deactivated members carried none of
+    # those ten, and all 11 active ones (8 people, 3 bot-shaped) carried all ten.
+    if not deactivated:
+        obj.update(
+            {
+                "real_name": display,
+                "is_admin": False,
+                "is_owner": False,
+                "is_primary_owner": False,
+                "is_restricted": False,
+                "is_ultra_restricted": False,
+                "tz": "America/Los_Angeles",
+                "tz_label": "Pacific Time",
+                "tz_offset": -28800,
+                "color": synth._digest(email)[:6],
+            }
+        )
+        # `has_2fa` has two conditions of its own, measured over both methods. The caller: an
+        # admin user token carries it for all 8 active people and a bot token for none of them
+        # (2026-09-21), which is docs.slack.dev's "Only visible if the user executing the call is
+        # an admin". The docs do not name the caller's own member: a user token that is not an
+        # admin carries it on that member and on no other (2026-09-23: on 1 of 20 members in
+        # `users.list`, the caller's, and in `users.info` for the caller and for none of the 7
+        # other active people). The member: no `is_bot` one carries it under the admin user token
+        # or the bot token. Backlot answers every active member `is_admin: false`, so its
+        # admin/service token is the only caller here that is an admin.
+        if (caller.is_admin or email == caller.email) and not is_bot:
+            obj["has_2fa"] = False
+    return obj
 
 
 @router.api_route("/api.test", methods=["GET", "POST"], response_model=SlackApiTest)
@@ -782,7 +802,7 @@ async def users_list(request: Request):
     emails = store.all_user_emails(conn)
     limit = _int(request, "limit", get_settings().default_page_size)
     page = emails[offset : offset + limit]
-    members = [_user_obj(conn, e) for e in page]
+    members = [_user_obj(conn, e, caller) for e in page]
     cursor = next_cursor(offset, len(page), len(emails))
     return {"ok": True, "members": members, "response_metadata": {"next_cursor": cursor}}
 
@@ -801,12 +821,12 @@ async def users_info(request: Request):
     uid = _param(request, "user")
     for e in store.all_user_emails(conn):
         if synth.slack_user_id(e) == uid:
-            return {"ok": True, "user": _user_obj(conn, e)}
+            return {"ok": True, "user": _user_obj(conn, e, caller)}
     # Display-only Slack speakers/bots (deploybot@…, payments-bot slugged to paymentsbot@…) aren't
     # principals; resolve them from the message authors so their IDs don't come back user_not_found.
     email = _slack_author_by_uid(request, conn, uid)
     if email:
-        return {"ok": True, "user": _user_obj(conn, email)}
+        return {"ok": True, "user": _user_obj(conn, email, caller)}
     return _err("user_not_found")
 
 
@@ -1744,7 +1764,7 @@ def _message(
     reactions = _reactions(row)
     if reactions:
         m["reactions"] = reactions
-    files = store.jcol(row, "files")
+    files = _files(row)
     if files:
         m["files"] = files
     edited = store.jcol(row, "edited", {})
@@ -1816,6 +1836,19 @@ def _reactions(row) -> list[dict]:
                 "count": len(users),
             }
         )
+    return out
+
+
+def _files(row) -> list[dict]:
+    """Renders `user` via `synth.slack_user_id`, the same lift `_reactions` gives
+    `reactions.users` and `_edited` gives `edited.user` (see `backlot/schemas/slack.schema.json`
+    for the vendor shape behind it). Every other field passes through unchanged."""
+    out = []
+    for f in store.jcol(row, "files"):
+        f = dict(f)
+        if "user" in f:
+            f["user"] = synth.slack_user_id(f["user"])
+        out.append(f)
     return out
 
 

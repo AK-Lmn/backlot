@@ -57,13 +57,21 @@ class Settings(BaseSettings):
     # --- pagination defaults ---
     # For the vendors whose real page sizes are not measured: Slack's `limit`, Gmail's and Drive's
     # `maxResults` / `pageSize` and the Jira search's `maxResults` default to the first, and Slack
-    # and Google cap a sent value at the second (the Jira search caps nowhere). A vendor whose
-    # numbers are measured or documented carries them in its own router instead: GitHub pages at 30
-    # and caps at 100 (backlot.routers.github.PER_PAGE_DEFAULT / PER_PAGE_MAX), Linear at 50 and
-    # caps at 250, Notion caps at 100, Fireflies at 50, HubSpot at 100 (500 for associations), S3
-    # at 1000 either way, Confluence pages at 25.
+    # and Google cap a sent value at the second (silently clamping it, which the Jira search never
+    # does — it refuses a sent value outside 1-5000 instead; see
+    # backlot.routers.atlassian._JIRA_SEARCH_MAX_RESULTS_RANGE). A vendor whose numbers are measured
+    # or documented carries them in its own router instead: GitHub pages at 30 and caps at 100
+    # (backlot.routers.github.PER_PAGE_DEFAULT / PER_PAGE_MAX), Linear at 50 and caps at 250, Notion
+    # caps at 100, Fireflies at 50, HubSpot at 100 (500 for associations), S3 at 1000 either way,
+    # Confluence pages at 25.
     default_page_size: int = 100
     max_page_size: int = 1000
+
+    # --- github ---
+    # On by default: a mock more permissive than the vendor hides a client's coming production 403
+    # (see ``backlot.routers.github.rate_limit_refusal``). docs/configuration.md's GitHub section
+    # has what the switch does and when to flip it.
+    github_enforce_rate_limits: bool = True
 
     # --- sqlite read tuning (serving connection; see store.connect_ro) ---
     # Sized for the corpus most people serve — their own, or the bundled one, which is under a

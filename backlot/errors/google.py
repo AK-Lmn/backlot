@@ -8,18 +8,20 @@ status codes were already right.
 Everything here was measured against the live Docs / Drive / Gmail / Sheets / Slides APIs. The
 envelope is NOT uniform — three families differ in which optional members they carry:
 
-    family                  errors[]           status               no Authorization header
-    ------------------------|------------------|---------------------|------------------------
-    Drive v3                | always           | auth failures only  | 403 PERMISSION_DENIED
+    family                  errors[]           status               no Authorization header, GET
+    ------------------------|------------------|---------------------|-----------------------------
+    Drive v3                | always           | auth failures and   | 403 PERMISSION_DENIED
+                            |                  | typed values only   |
     Gmail v1                | unless $.xgafv=2 | always              | 401 UNAUTHENTICATED
     Docs v1 / Slides v1     | $.xgafv=1        | always              | 401 UNAUTHENTICATED
     Sheets v4               | $.xgafv=1        | always              | 403 PERMISSION_DENIED
 
-Sheets parts from the other two editor APIs on that last column: measured, a request with no
+Sheets parts from the other two editor APIs on that last column: measured, a GET with no
 Authorization header is 403 PERMISSION_DENIED with the unregistered-caller sentence, where Docs
-answers 401 UNAUTHENTICATED with the missing-credential one. A present-but-invalid token is 401
-UNAUTHENTICATED in every family, which is why a missing header and a bad token are separate
-constructors here rather than one "unauthorized".
+answers 401 UNAUTHENTICATED with the missing-credential one. The column is the GET rule only
+(:func:`no_credentials`). A present-but-invalid token is 401 UNAUTHENTICATED in every family, which
+is why a missing header and a bad token are separate constructors here rather than one
+"unauthorized".
 
 `errors[]` is what `$.xgafv` selects, and the middle column above is the whole rule
 (:func:`has_errors_array`). It is a SYSTEM parameter — a top-level entry of a discovery document's
@@ -41,11 +43,12 @@ Inside `errors[]` the entry follows the constructor that raised it, and each one
 measurement. Measured on Sheets and Docs at `$.xgafv=1`: a typed value the proto layer refuses is
 ``reason: invalid`` with NO ``domain`` (:func:`invalid_field_value`); every other measured 400 is
 ``badRequest`` under ``global`` (:func:`invalid_argument`, :func:`bad_field_mask`); a 404 is
-``notFound``; a bad token ``authError`` at ``location: Authorization``; an anonymous Sheets request
-``forbidden``; an anonymous request on any of the three OAuth-only APIs ``required`` with the short
-``Login Required.``. The two editor 400s NOT measured keep whatever their constructor already
-renders — ``Invalid gridRange`` is :func:`invalid_argument`, so ``badRequest``, but an Office file
-read as a native document is :func:`failed_precondition`, so ``failedPrecondition``.
+``notFound``; a bad token ``authError`` at ``location: Authorization``; an anonymous Sheets GET
+``forbidden``; the missing credential — any anonymous POST, and a GET on the three OAuth-only APIs
+— ``required`` with the short ``Login Required.``. The two editor 400s NOT measured keep whatever
+their constructor already renders — ``Invalid gridRange`` is :func:`invalid_argument`, so
+``badRequest``, but an Office file read as a native document is :func:`failed_precondition`, so
+``failedPrecondition``.
 """
 
 from __future__ import annotations
@@ -57,8 +60,9 @@ from collections.abc import Mapping
 from fastapi import HTTPException, Request, Response
 
 DRIVE, GMAIL, EDITOR = "drive", "gmail", "editor"
-# `status` needs no per-family flag: Drive's parameter failures simply do not have one, while every
-# Gmail and editor error does, so "the error carries a status" is the whole condition.
+# `status` needs no per-family flag: Drive's parameter failures other than a typed value simply do
+# not have one, while every Gmail and editor error does, so "the error carries a status" is the
+# whole condition.
 _PREFIX_FAMILY = (
     ("/drive/v3", DRIVE),
     ("/gmail/v1", GMAIL),
@@ -190,11 +194,54 @@ def invalid_argument(message: str) -> GoogleError:
     return GoogleError(400, message, reason="badRequest", status="INVALID_ARGUMENT")
 
 
-def invalid_field_value(message: str) -> GoogleError:
+def invalid_field_value(field: str, message: str) -> GoogleError:
     """The proto layer's refusal of a typed value — ``Invalid value at '<field>' (<type>),
     "<value>"`` for an enum, a bool or an int32. Measured at `$.xgafv=1`, its `errors[]` entry is
     ``reason: invalid`` and carries no ``domain``, which no other Google error measured does."""
-    return GoogleError(400, message, reason="invalid", status="INVALID_ARGUMENT", domain=None)
+    return invalid_field_values([(field, message)])
+
+
+def invalid_field_values(violations: list[tuple[str, str]]) -> GoogleError:
+    """One refusal for every typed value the proto layer could not read, as ``(field, message)``
+    pairs in the order to report them.
+
+    Measured 2026-09-23 on Sheets `values.get`, `spreadsheets.get` and `:getByDataFilter` and on
+    Drive `files.list`, over query parameters and a JSON body alike: each refused value is a
+    ``google.rpc.BadRequest`` field violation in `details`, naming the field the way its message
+    does and repeating the message as its description, and a request with several is one 400 whose
+    message joins theirs with newlines, in the order `details` lists them. Which order that is,
+    is ``routers.google._typed_query``'s."""
+    return GoogleError(
+        400,
+        "\n".join(message for _, message in violations),
+        reason="invalid",
+        status="INVALID_ARGUMENT",
+        domain=None,
+        details=[
+            {
+                "@type": "type.googleapis.com/google.rpc.BadRequest",
+                "fieldViolations": [
+                    {"field": field, "description": message} for field, message in violations
+                ],
+            }
+        ],
+    )
+
+
+def field_violations(exc: GoogleError) -> list[tuple[str, str]]:
+    """The ``(field, message)`` pairs an :func:`invalid_field_values` refusal carries, so a caller
+    reading several values can gather every refusal into one."""
+    return [(v["field"], v["description"]) for d in exc.details or () for v in d["fieldViolations"]]
+
+
+def unsupported_conversion() -> GoogleError:
+    """`files.export` asked for a format the file's type does not export to. Measured 2026-09-23
+    on a spreadsheet: `text/plain`, `bogus/type`, a native Google type, a padded `text/csv `,
+    `text/csv;charset=utf-8` and an empty value each answer this, ``badRequest`` at
+    ``location: convertTo``."""
+    return GoogleError(
+        400, "The requested conversion is not supported.", reason="badRequest", location="convertTo"
+    )
 
 
 def bad_field_mask(path: str) -> GoogleError:
@@ -225,6 +272,15 @@ def bad_field_mask(path: str) -> GoogleError:
     )
 
 
+def invalid_attachment_token() -> GoogleError:
+    """Gmail's answer to an attachment id it does not hold. Measured 2026-09-30 and 2026-10-01:
+    400 INVALID_ARGUMENT for a made-up id and for a real one with characters changed, whatever
+    message id the path names: one that exists, one that does not, and a non-hex one alike."""
+    return GoogleError(
+        400, "Invalid attachment token", reason="invalidArgument", status="INVALID_ARGUMENT"
+    )
+
+
 def invalid_id_value() -> GoogleError:
     """Gmail's answer to an id it cannot parse — measured: 400 INVALID_ARGUMENT "Invalid id value"
     for a non-hex id or one at/above 2**63, where a well-formed but unknown id is 404 instead."""
@@ -250,13 +306,14 @@ def bad_token() -> GoogleError:
 
 
 def missing_credentials() -> GoogleError:
-    """No Authorization header, on an OAuth-only API (Gmail, Docs, Slides).
+    """No Authorization header, on an OAuth-only API (Gmail, Docs, Slides), or on a POST to any
+    of the five.
 
-    One answer for the three: measured 2026-09-14, Gmail, Docs and Slides send the same long
+    One answer for all of them: measured 2026-09-14, Gmail, Docs and Slides send the same long
     top-level message and the same `errors[]` entry, the short ``Login Required.`` at ``location:
-    Authorization``. Which of them SHOWS that entry still differs — Gmail carries it unless
-    `$.xgafv=2`, the editor families only at `1` — but that is `has_errors_array`'s rule, not a
-    difference in the error."""
+    Authorization``, and measured 2026-09-22 the two Sheets data-filter POSTs send both too. Which
+    of them SHOWS that entry still differs — Gmail carries it unless `$.xgafv=2`, the editor
+    families only at `1` — but that is `has_errors_array`'s rule, not a difference in the error."""
     return GoogleError(
         401,
         MISSING_CREDENTIALS_MESSAGE,
@@ -269,17 +326,20 @@ def missing_credentials() -> GoogleError:
 
 
 def unregistered_caller() -> GoogleError:
-    """No Authorization header, on an API that also accepts API keys (Drive, Sheets) — so an
-    anonymous request is a caller with no established identity rather than a missing credential."""
+    """No Authorization header, on a GET to an API that also accepts API keys (Drive, Sheets) — so
+    an anonymous GET is a caller with no established identity rather than a missing credential."""
     return GoogleError(
         403, UNREGISTERED_CALLER_MESSAGE, reason="forbidden", status="PERMISSION_DENIED"
     )
 
 
-def no_credentials(path: str) -> GoogleError:
-    """The right anonymous-request error for this path. Sheets shares the editor ENVELOPE with Docs
-    and Slides but not this behaviour, so it is resolved from the path rather than the family."""
-    if family(path) == DRIVE or path.startswith("/sheets/v4"):
+def no_credentials(path: str, method: str) -> GoogleError:
+    """The right anonymous-request error for this path and method. Sheets shares the editor ENVELOPE
+    with Docs and Slides but not this behaviour, so it is resolved from the path rather than the
+    family; and the path is half the rule. Measured 2026-09-22 with no ``Authorization`` header on
+    all five families: a GET on Drive or Sheets is the 403 unregistered caller, and a POST on any of
+    the five — Sheets' two data-filter reads included — is the 401 missing credential."""
+    if method == "GET" and (family(path) == DRIVE or path.startswith("/sheets/v4")):
         return unregistered_caller()
     return missing_credentials()
 
@@ -305,29 +365,72 @@ def bad_system_parameter(name: str, value: str) -> GoogleError:
 def xgafv(query: Mapping[str, str] | None) -> str | None:
     """The `$.xgafv` a request sent, or ``None``. Starlette's ``QueryParams.get`` answers the LAST
     repeat, which is the one real reads -- and `$.xgafv` is the one system parameter that works
-    that way. Measured 2026-09-15 on Sheets: `1&2` carries no `errors[]` where `2&1` does, while
-    `callback`, `alt`, `fields` and `prettyPrint` each answer their FIRST repeat
-    (:func:`first_repeat`)."""
+    that way. The pair that measured it, and the end every other measured parameter is read from,
+    are :func:`first_repeat`'s table."""
     return None if query is None else query.get(XGAFV)
 
 
 def first_repeat(query: Mapping[str, str] | None, name: str) -> str | None:
-    """The FIRST repeat of ``name``, which is the one real reads for the system parameters that are
-    not `$.xgafv`.
+    """The FIRST repeat of ``name``, or ``None`` when the request does not send it.
 
-    Measured 2026-09-15 on Sheets and Drive, one pair per parameter: `callback=cb&callback=dd` is
-    called through `cb`, `alt=media&alt=json` answers the `media` refusal, `fields=range&fields=
-    bogus` answers a 200 carrying `range` where `bogus` first is a 400, and
-    `prettyPrint=false&prettyPrint=true` is compact. A second repeat is not even validated --
-    `callback=cb&callback=a b` answers the success through `cb`. ``QueryParams.get`` answers the
-    last, so reading one of these off it is wrong wherever a caller repeats it.
+    Real reads a repeated query parameter from one end or the other, and no rule divides the two:
+    `prettyPrint` and `$.xgafv` are both system parameters, `pageSize` and `majorDimension` both
+    method parameters, and in each pair one is read first and the other last. So this is a table,
+    one ordered pair per row, each sent both ways round so the answer names the end that was read.
+    ``QueryParams.get`` answers the last repeat, so the untyped parameters in the first group are
+    read through here and those in the second off ``.get``; a typed one has every repeat parsed by
+    ``routers.google._typed_query`` and is read from the end its group names::
 
-    Read through here by `callback` and by `alt`, which :func:`jsonp_callback` needs to agree with
-    ``routers.google._sheets_respond`` on. The other parameters still come off ``QueryParams.get``
-    at their own read sites, which is right for some of them and wrong for the rest: measured the
-    same day, `majorDimension` and `includeGridData` really are read last, while `fields`,
-    `prettyPrint`, `pageSize`, `pageToken`, `q`, `orderBy` and `mimeType` are read first and are
-    not yet fixed here.
+        read first          the pair, and what real answers       measured on
+        ------------------|--------------------------------------|-------------------------------
+        callback          | `cb&dd` calls `cb`                   | Sheets 2026-09-15
+        alt               | `media&json` is the `media` refusal  | Sheets 2026-09-15
+                          |                                      | Drive files.get 2026-09-17
+        fields            | `<mask>&bogus` answers the mask,     | Sheets values.get,
+                          | `bogus&<mask>` a 400                 | values:batchGet,
+                          |                                      | spreadsheets.get and both
+                          |                                      | POSTs; Drive files.list,
+                          |                                      | files.get and about;
+                          |                                      | 2026-09-23
+        prettyPrint       | `false&true` is compact,             | Sheets values.get,
+                          | `true&false` indented                | values:batchGet,
+                          |                                      | spreadsheets.get and both
+                          |                                      | POSTs; 2026-09-23
+        q                 | `<folders>&<sheets>` lists folders   | Drive files.list 2026-09-23
+        pageSize          | `1&3` is one file                    | Drive files.list 2026-09-23
+        pageToken         | `<valid>&BOGUS` is the next page,    | Drive files.list 2026-09-23
+                          | `BOGUS&<valid>` a 400                |
+        orderBy           | `name&name desc` ascends             | Drive files.list 2026-09-23
+        mimeType          | `text/csv&text/tab-separated-values` | Drive files.export 2026-09-23
+                          | answers CSV                          |
+
+        read last
+        ------------------|--------------------------------------|-------------------------------
+        $.xgafv           | `1&2` has no `errors[]`, `2&1` has   | Sheets 2026-09-15
+                          |                                      | Gmail 2026-09-22
+        majorDimension    | `ROWS&COLUMNS` answers `COLUMNS`     | Sheets values.get 2026-09-23
+        valueRenderOption | `FORMULA&FORMATTED_VALUE` answers    | Sheets values.get 2026-09-23
+                          | the value, the reverse the formula   |
+        includeGridData   | `true&false` answers no grid         | Sheets spreadsheets.get
+                          |                                      | 2026-09-22
+
+    An empty first repeat is read as itself rather than skipped, measured 2026-09-23:
+    `q=&q=<folders>` is the unfiltered listing, `fields=&fields=id` on Drive `files.get` answers
+    ``{}``, and `prettyPrint=&prettyPrint=false` is indented, each what the empty value alone
+    answers.
+
+    A second repeat of a parameter read first is not validated, measured 2026-09-23:
+    `fields=id&fields=bogus`, `q=<folders>&q=<a clause Drive cannot parse>`,
+    `orderBy=name&orderBy=bogus`, `pageToken=<valid>&pageToken=BOGUS` and
+    `mimeType=text/csv&mimeType=bogus/type` each answer what their first value alone does, as
+    `callback=cb&callback=a b` did on 2026-09-15. `pageSize` is the exception:
+    `pageSize=2&pageSize=NOPE` is a 400 whichever end the bad value is at, and so is a bad value at
+    either end of `valueRenderOption`, `dateTimeRenderOption`, `includeGridData` or
+    `excludeTablesInBandedRanges`, measured the same day, and of `majorDimension`, measured
+    2026-09-22.
+
+    Gmail's `q`, `pageToken` and `maxResults` stay on ``.get`` because their end is unmeasured: a
+    Gmail list answers 200 only to a scope the measuring credential cannot be granted.
     """
     if query is None:
         return None
