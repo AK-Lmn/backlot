@@ -367,6 +367,10 @@ def _uid(email: str) -> str:
     is the service account, which is not a person and whose id `auth.test` already fixes at
     ``USERVICE0``; hashing its sentinel address instead would give a client two different ids for
     the same caller.
+
+    Used wherever a STORED author becomes an id — the message, a search hit, a thread's reply
+    authors and its parent, a reaction, an edit stamp, a user object. A site that hashes directly
+    would answer a different id for the same person than the one beside it.
     """
     return SERVICE_USER_ID if email == SERVICE_EMAIL else synth.slack_user_id(email)
 
@@ -633,7 +637,7 @@ async def conversations_history(request: Request):
         rc = store.slack_reply_count(conn, name, r["ts"], ids) if r["thread_ts"] else 0
         latest = store.slack_latest_reply_ts(conn, name, r["ts"], ids) if rc else None
         ru = store.slack_reply_authors(conn, name, r["ts"], ids) if rc else []
-        ruids = [synth.slack_user_id(e) for e in ru[:5]]
+        ruids = [_uid(e) for e in ru[:5]]
         messages.append(
             _message(
                 r,
@@ -719,8 +723,8 @@ async def conversations_replies(request: Request):
     rc = sum(1 for x in rows if x["thread_seq"] > 0)
     latest = store.slack_latest_reply_ts(conn, name, root["ts"], ids) if rc else None
     ru = store.slack_reply_authors(conn, name, root["ts"], ids)
-    ruids = [synth.slack_user_id(e) for e in ru[:5]]
-    parent_uid = synth.slack_user_id(root["author_email"])
+    ruids = [_uid(e) for e in ru[:5]]
+    parent_uid = _uid(root["author_email"])
     messages = [
         _message(
             x,
@@ -1135,6 +1139,12 @@ async def chat_post_message(request: Request):
         # what `thread_ts` holds on every row of a thread, the root included.
         thread_ts = parent["thread_ts"] or parent["ts"]
         thread_seq = store.slack_next_thread_seq(conn, name, thread_ts)
+        if not parent["thread_ts"]:
+            # The first reply turns a standalone message into a root, which the corpus spells as
+            # the message carrying its own ts. Without the stamp the parent stays NULL, and then
+            # `conversations.replies` answers the root alone and the message reads back with no
+            # thread at all — a thread this API made and cannot show.
+            store.patch_document(conn, "slack", (name, parent["ts"]), "thread_ts", thread_ts)
     now = int(time.time())
     ts = store.slack_next_ts(conn, name, now)
     store.insert_document(
@@ -1584,7 +1594,7 @@ def _search_match(conn, row) -> dict:
             "name": ch,
             "is_private": not store.container_has_public(conn, "slack", ch),
         },
-        "user": synth.slack_user_id(row["author_email"]),
+        "user": _uid(row["author_email"]),
         "username": _handle(row["author_email"]),
         "ts": ts,
         "text": text,

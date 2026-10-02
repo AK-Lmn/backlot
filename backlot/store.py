@@ -228,7 +228,11 @@ WRITABLE = frozenset({"slack"})
 # a patch to an identifier column would move a row out from under its own ACL grant, since a grant
 # names its document by exactly `ID_COLUMNS`.
 PATCHABLE = {
-    "slack": frozenset({"content", "reactions", "edited"}),
+    # `thread_ts` is here because a reply promotes its parent: the corpus marks a root by storing
+    # the root's own ts there (`thread_ts == ts`), and a standalone message carries NULL, so the
+    # first reply has to stamp the message it answers. Not an identifier column — a slack document
+    # is keyed (channel, ts) — so patching it moves nothing out from under its ACL grant.
+    "slack": frozenset({"content", "reactions", "edited", "thread_ts"}),
 }
 
 

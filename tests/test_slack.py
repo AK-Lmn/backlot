@@ -1933,6 +1933,30 @@ def test_the_service_token_posts_as_a_bot(wclient, admin_h):
         data={"channel": cid, "ts": j["ts"], "text": "ci again"},
     ).json()
     assert edited["message"]["edited"]["user"] == "USERVICE0"
+    # Every path that renders a stored author, not only the message builder: a search hit, and a
+    # thread's parent and reply authors. Each used to mint the id itself, so the same message came
+    # back as USERVICE0 from history and as a hash of the sentinel from search.
+    hit = [
+        m
+        for m in wclient.post(
+            "/slack/api/search.messages", headers=admin_h, data={"query": "ci again"}
+        ).json()["messages"]["matches"]
+        if m["ts"] == j["ts"]
+    ][0]
+    assert hit["user"] == "USERVICE0"
+    root = wclient.post(
+        "/slack/api/chat.postMessage", headers=admin_h, data={"channel": cid, "text": "ci root"}
+    ).json()["ts"]
+    wclient.post(
+        "/slack/api/chat.postMessage",
+        headers=admin_h,
+        data={"channel": cid, "text": "ci reply", "thread_ts": root},
+    )
+    thread = wclient.post(
+        "/slack/api/conversations.replies", headers=admin_h, data={"channel": cid, "ts": root}
+    ).json()["messages"]
+    assert thread[0]["reply_users"] == ["USERVICE0"]
+    assert thread[-1]["parent_user_id"] == "USERVICE0"
 
 
 def test_a_posted_message_is_visible_only_where_the_channel_is(wclient, tokens):
@@ -2494,6 +2518,22 @@ def test_posting_with_thread_ts_replies_in_that_thread(wclient, tokens, ro_conn)
         "/slack/api/conversations.history", headers=h, data={"channel": cid, "limit": 200}
     ).json()["messages"]
     assert posted["ts"] not in [m["ts"] for m in hist]
+    # A reply to a STANDALONE message makes that message a root, which the corpus spells as the
+    # message carrying its own ts. Without the stamp `conversations.replies` answers the parent
+    # alone — a thread this API made and cannot show.
+    alone = wclient.post(
+        "/slack/api/chat.postMessage", headers=h, data={"channel": cid, "text": "alone"}
+    ).json()["ts"]
+    answered = wclient.post(
+        "/slack/api/chat.postMessage",
+        headers=h,
+        data={"channel": cid, "text": "answering it", "thread_ts": alone},
+    ).json()["ts"]
+    thread = wclient.post(
+        "/slack/api/conversations.replies", headers=h, data={"channel": cid, "ts": alone}
+    ).json()["messages"]
+    assert [m["ts"] for m in thread] == [alone, answered]
+    assert thread[0]["thread_ts"] == alone and thread[0]["reply_count"] == 1
 
 
 def test_replying_to_a_reply_lands_in_the_same_thread(wclient, tokens, ro_conn):
