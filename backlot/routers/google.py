@@ -13,6 +13,7 @@ import base64
 import datetime
 import hashlib
 import json
+import quopri
 import re
 import string
 from email.parser import BytesParser
@@ -71,7 +72,6 @@ class GmailThread(_GLoose):
 
 
 class GmailAttachment(_GLoose):
-    attachmentId: str
     size: int
     data: str
 
@@ -274,51 +274,57 @@ async def gmail_profile(user_id: str, request: Request):
 # query for it has to agree with the message it comes back with.
 _GMAIL_DEFAULT_LABEL = "INBOX"
 
-# The system labels Gmail always exposes (users.labels.list).
+# The system labels Gmail always exposes (users.labels.list), in the order real `labels.list`
+# returned them on one mailbox, twice, on 2026-10-01. Gmail documents no order, so this is
+# Backlot's choice, taken from that measurement.
 _SYSTEM_LABELS = [
-    "INBOX",
+    "CHAT",
     "SENT",
+    "INBOX",
+    "IMPORTANT",
+    "TRASH",
     "DRAFT",
     "SPAM",
-    "TRASH",
-    "UNREAD",
-    "STARRED",
-    "IMPORTANT",
-    "CHAT",
-    "CATEGORY_PERSONAL",
-    "CATEGORY_SOCIAL",
-    "CATEGORY_UPDATES",
     "CATEGORY_FORUMS",
+    "CATEGORY_UPDATES",
+    "CATEGORY_PERSONAL",
     "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL",
+    "YELLOW_STAR",
+    "STARRED",
+    "UNREAD",
 ]
 
+# Measured against gmail.googleapis.com on a Google Workspace account on 2026-09-30, and again on
+# 2026-10-02: these four labels and the five `CATEGORY_` ones carry `messageListVisibility: "hide"`
+# and `labelListVisibility: "labelHide"`, and the rest carry neither member. A personal account
+# measured on 2026-10-01 also served INBOX with `messageListVisibility: "hide"` and
+# `labelListVisibility: "labelShow"`; what makes the two differ was not measured.
+_HIDDEN_LABELS = {"IMPORTANT", "CHAT", "SPAM", "TRASH"}
 
-def _label_obj(lid: str, messages: int = 0, threads: int = 0) -> dict:
-    hide = lid in ("SPAM", "TRASH", "CHAT")
-    return {
-        "id": lid,
-        "name": lid,
-        "type": "system",
-        "messageListVisibility": "hide" if hide else "show",
-        "labelListVisibility": "labelHide" if lid.startswith("CATEGORY_") else "labelShow",
-        "messagesTotal": messages,
-        "messagesUnread": 0,
-        "threadsTotal": threads,
-        "threadsUnread": 0,
-    }
+
+def _label_obj(lid: str, counts: tuple[int, int] | None = None) -> dict:
+    """One system label. `labels.list` serves no counts and `labels.get` serves all four, as
+    measured on 2026-09-30 — so `counts` is ``(messages, threads)`` on a get and None on a list."""
+    obj = {"id": lid, "name": lid, "type": "system"}
+    if lid in _HIDDEN_LABELS or lid.startswith("CATEGORY_"):
+        obj["messageListVisibility"] = "hide"
+        obj["labelListVisibility"] = "labelHide"
+    if counts is not None:
+        messages, threads = counts
+        obj |= {
+            "messagesTotal": messages,
+            "messagesUnread": 0,
+            "threadsTotal": threads,
+            "threadsUnread": 0,
+        }
+    return obj
 
 
 @router.get("/gmail/v1/users/{user_id}/labels")
 async def gmail_labels(user_id: str, request: Request):
-    conn = auth.conn(request)
-    caller = _require(request)
-    ids = auth.visible_ids(request, caller)
-    messages, threads = _mailbox_totals(conn, caller, user_id, ids)
-    labels = [
-        _label_obj(lid, *((messages, threads) if lid == _GMAIL_DEFAULT_LABEL else (0, 0)))
-        for lid in _SYSTEM_LABELS
-    ]
-    return {"labels": labels}
+    _require(request)
+    return {"labels": [_label_obj(lid) for lid in _SYSTEM_LABELS]}
 
 
 @router.get("/gmail/v1/users/{user_id}/labels/{label_id}")
@@ -329,9 +335,7 @@ async def gmail_label_get(user_id: str, label_id: str, request: Request):
         raise gerr.not_found_entity()
     ids = auth.visible_ids(request, caller)
     messages, threads = _mailbox_totals(conn, caller, user_id, ids)
-    return _label_obj(
-        label_id, *((messages, threads) if label_id == _GMAIL_DEFAULT_LABEL else (0, 0))
-    )
+    return _label_obj(label_id, (messages, threads) if label_id == _GMAIL_DEFAULT_LABEL else (0, 0))
 
 
 _GMAIL_OP = re.compile(r'(\w+):("[^"]*"|\S+)')
@@ -554,6 +558,7 @@ def _gmail_ids(row) -> tuple[str, str]:
 @router.get(
     "/gmail/v1/users/{user_id}/messages",
     response_model=GmailMessageList,
+    response_model_exclude_unset=True,
     openapi_extra={"parameters": _P_GMAIL_LIST},
 )
 async def gmail_messages_list(user_id: str, request: Request):
@@ -575,7 +580,10 @@ async def gmail_messages_list(user_id: str, request: Request):
         rows = store.list_gmail_in_range(conn, mailbox, None, None, ids, limit=limit, offset=offset)
     # threadId must agree with messages.get (a reply belongs to its root's thread)
     messages = [dict(zip(("id", "threadId"), _gmail_ids(r))) for r in rows]
-    body = {"messages": messages, "resultSizeEstimate": total}
+    # A list with no match leaves `messages` out rather than sending `[]` — measured on 2026-09-30,
+    # so a client that reads `response["messages"]` meets the KeyError it meets there.
+    body = {"messages": messages} if messages else {}
+    body["resultSizeEstimate"] = total
     token = next_page_token(offset, len(rows), total)
     if token:
         body["nextPageToken"] = token
@@ -622,12 +630,14 @@ async def gmail_attachment(user_id: str, msg_id: str, att_id: str, request: Requ
     if not found:
         raise gerr.invalid_attachment_token()
     body = _att_content(message_id, found[0], found[1])
-    return {"attachmentId": att_id, "size": len(body), "data": _b64url(body)}
+    # `{size, data}` alone: real names no `attachmentId` here, measured on 2026-09-30
+    return {"size": len(body), "data": _b64url(body)}
 
 
 @router.get(
     "/gmail/v1/users/{user_id}/threads",
     response_model=GmailThreadList,
+    response_model_exclude_unset=True,
     openapi_extra={"parameters": _P_GMAIL_LIST},
 )
 async def gmail_threads_list(user_id: str, request: Request):
@@ -657,10 +667,10 @@ async def gmail_threads_list(user_id: str, request: Request):
         rows = store.list_gmail_in_range(
             conn, mailbox, None, None, ids, limit=limit, offset=offset, roots_only=True
         )
-    threads = [
-        {"id": _gmail_ids(r)[1], "snippet": r["content"][:200], "historyId": "1"} for r in rows
-    ]
-    body = {"threads": threads, "resultSizeEstimate": total}
+    threads = [{"id": _gmail_ids(r)[1], "snippet": _snippet(r), "historyId": "1"} for r in rows]
+    # A list with no match leaves `threads` out rather than sending `[]`, measured on 2026-09-30.
+    body = {"threads": threads} if threads else {}
+    body["resultSizeEstimate"] = total
     token = next_page_token(offset, len(rows), total)
     if token:
         body["nextPageToken"] = token
@@ -688,9 +698,10 @@ async def gmail_thread_get(user_id: str, thread_id: str, request: Request):
             raise gerr.not_found_entity()
         msgs = [row]
     fmt = request.query_params.get("format", "full")
+    # No `snippet`: real serves one on a `threads.list` entry and not on `threads.get`, with or
+    # without `format=minimal` — measured on 2026-09-30.
     return {
         "id": thread_id.lower(),
-        "snippet": msgs[0]["content"][:200],
         "historyId": "1",
         "messages": [_gmail_message(m, fmt, caller.email) for m in msgs],
     }
@@ -708,13 +719,141 @@ def _att_content(message_id: str, i: int, att: dict) -> str:
     return att.get("content", f"attachment {_att_id(message_id, i)}")
 
 
-def _leaf(mime: str, part_id: str, data: str) -> dict:
-    return {
+def _header(name: str, value: str) -> dict:
+    return {"name": name, "value": value}
+
+
+def _text_node(mime: str, data: str, encoding: str | None) -> dict:
+    """A text leaf, sent in `encoding` (None: as it is, with no `Content-Transfer-Encoding`)."""
+    headers = [_header("Content-Type", f'{mime}; charset="UTF-8"')]
+    if encoding:
+        headers.append(_header("Content-Transfer-Encoding", encoding))
+    return {"mimeType": mime, "filename": "", "headers": headers, "data": data, "cte": encoding}
+
+
+# Gmail's web composer quoted-printables an ASCII text/html part once a line is longer than this. Its
+# own choice, not an API rule: `messages.send` stores and serves whatever the sender wrote. Measured
+# on 2026-10-02: lines of 80, 81 and 175 characters went with no `Content-Transfer-Encoding` and
+# lines of 325 and 425 went quoted-printable, so the limit lies somewhere in 175..324; that range is
+# all that was measured, and 250 is a pick inside it.
+_HTML_QP_LINE = 250
+
+
+def _mime_tree(row, html: str, attachments: list) -> list[dict]:
+    """The payload's parts, which `full` serves as JSON and `raw` as MIME, so the two describe one
+    message. As measured on 2026-09-30: with no attachment the payload is `multipart/alternative`
+    over the text and HTML parts; with one it is `multipart/mixed` over a `multipart/alternative`
+    part holding those two, then one part per attachment."""
+    # The part headers are what Gmail's web composer writes, which the API passes through. Measured
+    # on web-composed messages on 2026-09-30, 2026-10-01 and 2026-10-02: text/plain is base64 when
+    # its text is non-ASCII and carries no `Content-Transfer-Encoding` otherwise (the composer wraps
+    # ASCII text at 74 characters, so no sample had a long ASCII text/plain line); text/html is
+    # quoted-printable when it is non-ASCII or has a line longer than `_HTML_QP_LINE`, and carries
+    # no `Content-Transfer-Encoding` otherwise.
+    html_qp = not html.isascii() or any(len(line) > _HTML_QP_LINE for line in html.splitlines())
+    texts = [
+        _text_node("text/plain", row["content"], None if row["content"].isascii() else "base64"),
+        _text_node("text/html", html, "quoted-printable" if html_qp else None),
+    ]
+    if not attachments:
+        return texts
+    alt_boundary = f"a_{row['id'][:12]}"
+    nodes = [
+        {
+            "mimeType": "multipart/alternative",
+            "filename": "",
+            "headers": [
+                _header("Content-Type", f'multipart/alternative; boundary="{alt_boundary}"')
+            ],
+            "boundary": alt_boundary,
+            "parts": texts,
+        }
+    ]
+    for i, att in enumerate(attachments):
+        filename = att.get("filename", "attachment.bin")
+        mime = att.get("mime", "application/octet-stream")
+        # A text attachment names its charset: US-ASCII for ASCII content and UTF-8 otherwise, as an
+        # ASCII one (2026-10-01) and a Korean one (2026-09-30) were served. A binary type has none
+        # to name.
+        ascii_att = _att_content(row["id"], i, att).isascii()
+        charset = (
+            f'; charset="{"US-ASCII" if ascii_att else "UTF-8"}"'
+            if mime.startswith("text/")
+            else ""
+        )
+        # `f_` and nine lowercase alphanumerics, the one attachment measured on 2026-09-30
+        x_id = f"f_{synth.gmail_id(row['id'], salt=f'att{i}')[:9]}"
+        nodes.append(
+            {
+                "mimeType": mime,
+                "filename": filename,
+                "headers": [
+                    _header("Content-Type", f'{mime}{charset}; name="{filename}"'),
+                    _header("Content-Disposition", f'attachment; filename="{filename}"'),
+                    _header("Content-Transfer-Encoding", "base64"),
+                    _header("X-Attachment-Id", x_id),
+                    _header("Content-ID", f"<{x_id}>"),
+                ],
+                "attachment": (i, att),
+            }
+        )
+    return nodes
+
+
+def _json_part(node: dict, part_id: str, message_id: str) -> dict:
+    """One node of `_mime_tree` as a `full` payload part."""
+    part = {
         "partId": part_id,
-        "mimeType": mime,
-        "filename": "",
-        "body": {"size": len(data), "data": _b64url(data)},
+        "mimeType": node["mimeType"],
+        "filename": node["filename"],
+        "headers": node["headers"],
     }
+    if "parts" in node:
+        part["body"] = {"size": 0}
+        part["parts"] = [
+            _json_part(child, f"{part_id}.{j}", message_id) for j, child in enumerate(node["parts"])
+        ]
+    elif "attachment" in node:
+        i, att = node["attachment"]
+        # size = the exact byte length attachments.get serves (see _att_content), so a client can
+        # stat the attachment from this metadata without a second call — real Gmail's contract.
+        part["body"] = {
+            "attachmentId": _att_id(message_id, i),
+            "size": len(_att_content(message_id, i, att)),
+        }
+    else:
+        part["body"] = {"size": len(node["data"]), "data": _b64url(node["data"])}
+    return part
+
+
+def _mime_part(node: dict, message_id: str) -> str:
+    """One node of `_mime_tree` as a MIME entity, encoded as its own headers declare."""
+    head = "\r\n".join(f"{h['name']}: {h['value']}" for h in node["headers"])
+    if "parts" in node:
+        body = _mime_multipart(node["parts"], node["boundary"], message_id)
+    elif "attachment" in node:
+        i, att = node["attachment"]
+        # same bytes attachments.get serves, so raw MIME and the attachment endpoint agree
+        body = base64.b64encode(_att_content(message_id, i, att).encode("utf-8")).decode("ascii")
+    elif node["cte"] == "quoted-printable":
+        body = quopri.encodestring(node["data"].encode("utf-8")).decode("ascii")
+    elif node["cte"] == "base64":
+        body = base64.encodebytes(node["data"].encode("utf-8")).decode("ascii")
+    else:
+        body = node["data"]
+    return f"{head}\r\n\r\n{body}"
+
+
+def _mime_multipart(nodes: list[dict], boundary: str, message_id: str) -> str:
+    parts = "".join(f"--{boundary}\r\n{_mime_part(n, message_id)}\r\n" for n in nodes)
+    return parts + f"--{boundary}--"
+
+
+def _snippet(row) -> str:
+    """The message's first 200 characters, with `<` and `>` as `&lt;` and `&gt;`: real's snippet of
+    a quoted `Name <address>` line reads `Name &lt;address&gt;`, measured on 2026-09-30. Only those
+    two were in the text measured, so `&` and quotes are sent as they are."""
+    return row["content"][:200].replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _gmail_ts(row) -> int:
@@ -782,79 +921,39 @@ def _gmail_message(row, fmt: str, caller_email: str | None = None) -> dict:
         "id": _gmail_ids(row)[0],
         "threadId": _gmail_ids(row)[1],
         "labelIds": store.jcol(row, "label_ids") or [_GMAIL_DEFAULT_LABEL],
-        "snippet": row["content"][:200],
+        "snippet": _snippet(row),
         "historyId": "1",
         "internalDate": str(ts * 1000),
         "sizeEstimate": len(row["content"]) + 400,
     }
     html = row["body_html"] or f"<html><body><p>{row['content']}</p></body></html>"
+    if fmt == "minimal":
+        return msg
+    if fmt == "metadata":
+        # `mimeType` and `headers` alone: real sends no `partId`, `filename` or `body` on a
+        # metadata payload, measured on 2026-09-30.
+        msg["payload"] = {"mimeType": top_mime, "headers": headers}
+        return msg
+    nodes = _mime_tree(row, html, attachments)
     if fmt == "raw":
         # RFC 2822 message, base64url — a genuine boundary-delimited MIME body matching the
         # declared multipart Content-Type above. It has to be real MIME: a plain-text body under a
         # `multipart/...` header with no boundary makes Python's `email` parser raise
         # StartBoundaryNotFoundDefect/MultipartInvariantViolationDefect, and readers built on it
         # (llama-index's GmailReader) choke because `get_payload()` degrades to a bare
-        # string instead of a list of sub-messages). Mirrors the same flat text/plain + text/html
-        # (+ attachment) leaves the `full` format exposes via `parts` below.
-        leaves = [
-            f'Content-Type: text/plain; charset="UTF-8"\r\n\r\n{row["content"]}',
-            f'Content-Type: text/html; charset="UTF-8"\r\n\r\n{html}',
-        ]
-        for i, att in enumerate(attachments):
-            filename = att.get("filename", "attachment.bin")
-            mime = att.get("mime", "application/octet-stream")
-            # same bytes attachments.get serves, so raw MIME and the attachment endpoint agree
-            b64 = base64.b64encode(_att_content(row["id"], i, att).encode("utf-8")).decode("ascii")
-            leaves.append(
-                f'Content-Type: {mime}; name="{filename}"\r\n'
-                f'Content-Disposition: attachment; filename="{filename}"\r\n'
-                f"Content-Transfer-Encoding: base64\r\n\r\n{b64}"
-            )
-        mime_body = "".join(f"--{boundary}\r\n{leaf}\r\n" for leaf in leaves) + f"--{boundary}--"
+        # string instead of a list of sub-messages). Built from the same parts `full` serves.
+        mime_body = _mime_multipart(nodes, boundary, row["id"])
         raw = "\r\n".join(f"{h['name']}: {h['value']}" for h in headers) + "\r\n\r\n" + mime_body
         msg["raw"] = _b64url(raw)
         return msg
-    if fmt == "minimal":
-        return msg
-    if fmt == "metadata":
-        msg["payload"] = {
-            "partId": "",
-            "mimeType": top_mime,
-            "filename": "",
-            "headers": headers,
-            "body": {"size": 0},
-        }
-        return msg
 
-    # full: multipart with text/plain + text/html leaves, plus attachment leaves
-    parts = [_leaf("text/plain", "0", row["content"]), _leaf("text/html", "1", html)]
-    for i, att in enumerate(attachments):
-        parts.append(
-            {
-                "partId": str(i + 2),
-                "mimeType": att.get("mime", "application/octet-stream"),
-                "filename": att.get("filename", "attachment.bin"),
-                "headers": [
-                    {
-                        "name": "Content-Disposition",
-                        "value": f'attachment; filename="{att.get("filename", "attachment.bin")}"',
-                    }
-                ],
-                # size = the exact byte length attachments.get serves (see _att_content), so a client can
-                # stat the attachment from this metadata without a second call — real Gmail's contract.
-                "body": {
-                    "attachmentId": _att_id(row["id"], i),
-                    "size": len(_att_content(row["id"], i, att)),
-                },
-            }
-        )
     msg["payload"] = {
         "partId": "",
         "mimeType": top_mime,
         "filename": "",
         "headers": headers,
         "body": {"size": 0},
-        "parts": parts,
+        "parts": [_json_part(n, str(i), row["id"]) for i, n in enumerate(nodes)],
     }
     return msg
 
