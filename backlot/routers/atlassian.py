@@ -12,6 +12,7 @@ answer carries (:func:`vendor_headers`, put on by ``backlot.main.report_atlassia
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import time
@@ -283,14 +284,29 @@ def _resolve_jira_key(request: Request, conn, key: str, ids):
 )  # jira PyPI client probes this on connect
 @router.get("/rest/api/3/serverInfo", response_model=JiraServerInfo)
 async def jira_server_info(request: Request):
+    """The fifteen members Jira Cloud answers a signed-in caller, the same on v2 and v3 (measured
+    2026-10-03 and 2026-10-05). The four display URLs are the site's URL, `serverTitle` is `Jira`,
+    and the version and build number are the ones that site served. `scmInfo` is a synthesized
+    40-hex commit id, and `buildDate` a day before `serverTime`, since a build precedes the server
+    running it."""
     site = _site(request)
+    ts = synth.epoch("serverInfo")
     return {
         "baseUrl": site,
-        "version": "1000.0.0",
+        "displayUrl": site,
+        "displayUrlServicedeskHelpCenter": site,
+        "displayUrlConfluence": site,
+        "displayUrlCSMHelpSeeker": site,
+        "version": "1001.0.0-SNAPSHOT",
+        "versionNumbers": [1001, 0, 0],
         "deploymentType": "Cloud",
-        "versionNumbers": [1000, 0, 0],
-        "buildNumber": 100000,
-        "serverTime": synth.rfc3339_millis(synth.epoch("serverInfo")),
+        "buildNumber": 100294,
+        "buildDate": synth.jira_datetime(ts - 86400),
+        "serverTime": synth.rfc3339_millis(ts),
+        "scmInfo": hashlib.sha1(b"serverInfo").hexdigest(),
+        "serverTitle": "Jira",
+        "defaultLocale": {"locale": "en_US"},
+        "serverTimeZone": "Etc/UTC",
     }
 
 
