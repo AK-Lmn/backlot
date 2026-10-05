@@ -482,7 +482,7 @@ async def conversations_list(request: Request):
         want_private = "private_channel" in types
         names = [n for n in names if _is_private(request, conn, n) is want_private]
 
-    limit = _int(request, "limit", get_settings().default_page_size)
+    limit = _limit(request)
     page = [_listed_channel(request, conn, n, caller) for n in names[offset : offset + limit]]
     cursor = next_cursor(offset, len(page), len(names))
     return {"ok": True, "channels": page, "response_metadata": {"next_cursor": cursor}}
@@ -548,7 +548,7 @@ async def conversations_history(request: Request):
     # fewer than requested. A client that asks for 1000 (korotovsky) would make the client resolve
     # ~1000 roots x their authors/reply_users via users.info — slow. has_more/next_cursor still let
     # it paginate for more.
-    limit = min(_int(request, "limit", get_settings().default_page_size), _HISTORY_MAX_ROOTS)
+    limit = min(_limit(request), _HISTORY_MAX_ROOTS)
     offset = decode_cursor_or_none(_param(request, "cursor"))
     if offset is None:
         return _err("invalid_cursor")
@@ -720,7 +720,7 @@ async def conversations_members(request: Request):
     offset = decode_cursor_or_none(_param(request, "cursor"))
     if offset is None:
         return _err("invalid_cursor")
-    limit = _int(request, "limit", get_settings().default_page_size)
+    limit = _limit(request)
     # A channel's members are the people who have spoken in it — the only per-channel signal the
     # corpus carries. Never the whole roster: real Slack's membership differs per channel, and it
     # paginates this method.
@@ -759,7 +759,7 @@ async def users_list(request: Request):
     if offset is None:
         return _err("invalid_cursor")
     emails = store.all_user_emails(conn)
-    limit = _int(request, "limit", get_settings().default_page_size)
+    limit = _limit(request)
     page = emails[offset : offset + limit]
     members = [_user_obj(conn, e, caller) for e in page]
     cursor = next_cursor(offset, len(page), len(emails))
@@ -1259,6 +1259,15 @@ def _param(request: Request, key: str) -> str | None:
         return v
     form = getattr(request.state, "_form", None)
     return form.get(key) if form else None
+
+
+def _limit(request: Request) -> int:
+    """The page size a paged method serves. A `limit` of zero is read as no `limit` at all: on
+    `conversations.list`, `users.list`, `conversations.members` and `conversations.history`, `0`
+    (measured 2026-10-03 and 2026-10-05) and `00` (2026-10-05) answered what the same request
+    without `limit` answers, every item and an empty `next_cursor`, on collections of 8 to 21."""
+    default = get_settings().default_page_size
+    return _int(request, "limit", default) or default
 
 
 def _int(request: Request, key: str, default: int) -> int:
