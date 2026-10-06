@@ -607,6 +607,118 @@ def test_confluence_cql_search_filtered_by_space(client, admin_h):
     assert bogus["results"] == [] and bogus["totalSize"] == 0
 
 
+_CQL_REQUIRED = {
+    "statusCode": 400,
+    "data": {"authorized": True, "valid": True, "errors": [], "successful": True},
+    "message": (
+        "com.atlassian.confluence.api.service.exceptions.api.BadRequestException: "
+        "cql query parameter is required"
+    ),
+}
+_LIMIT_BELOW_ZERO = {
+    "statusCode": 400,
+    "message": "java.lang.IllegalArgumentException: limit cannot be less than zero",
+}
+
+
+@pytest.mark.parametrize(
+    "query, status, body",
+    [
+        ("", 400, _CQL_REQUIRED),
+        ("cql=", 400, _CQL_REQUIRED),
+        ("cql", 400, _CQL_REQUIRED),
+        ("CQL=type%3Dpage", 400, _CQL_REQUIRED),
+        ("cql=&cql=type%3Dpage", 400, _CQL_REQUIRED),
+        ("cql=type%3Dpage&cql=", 200, None),
+        ("limit=-1", 400, _CQL_REQUIRED),
+        ("cql=type%3Dpage&limit=-1", 400, _LIMIT_BELOW_ZERO),
+        ("cql=%20&limit=-1", 400, _LIMIT_BELOW_ZERO),
+        ("cql=&limit=abc", 404, None),
+        ("cql=&start=abc", 404, None),
+    ],
+)
+def test_confluence_cql_search_refuses_a_request_with_no_first_cql(
+    client, admin_h, query, status, body
+):
+    """The requests :func:`backlot.errors.atlassian.cql_required` records, beside the 404 that comes
+    ahead of it and the requests that pass it on to the negative refusal or to the search."""
+    r = client.get(f"/atlassian/wiki/rest/api/search?{query}", headers=admin_h)
+    assert r.status_code == status, r.text
+    if body is not None:
+        assert r.json() == body
+
+
+def test_confluence_cql_search_with_no_tilde_selects_by_its_clauses(tmp_path):
+    """Pins what :func:`backlot.routers.atlassian.confluence_cql_search` says a CQL with no `~`
+    clause answers, for the admin and for a caller one page is hidden from, and which value of a
+    repeated `cql` is searched.
+
+    Not SAMPLE: it holds pages alone, so a `type` clause would select the same rows as no clause."""
+    from backlot import synth
+
+    settings = tiny_corpus(
+        tmp_path,
+        [
+            {
+                "source_type": "confluence",
+                "doc_id": "q-guide",
+                "space": "eng",
+                "title": "Guide",
+                "content": "Body.",
+                "author_email": "ava@acme.com",
+                "visibility": "public",
+                "labels": ["runbook"],
+            },
+            {
+                "source_type": "confluence",
+                "doc_id": "q-post",
+                "space": "eng",
+                "subtype": "blogpost",
+                "title": "Post",
+                "content": "Body.",
+                "author_email": "ava@acme.com",
+                "visibility": "public",
+            },
+            {
+                "source_type": "confluence",
+                "doc_id": "q-shut",
+                "space": "ops",
+                "title": "Shut",
+                "content": "Body.",
+                "author_email": "bob@acme.com",
+                "visibility": "private",
+            },
+        ],
+    )
+    eng = synth.confluence_space_key("eng")
+    rows = [
+        # cql, the titles the admin is served, the titles ava is served. A list goes out as a
+        # repeated `cql`, read from its first value as `cql_required` records.
+        ("type=page", {"Guide", "Shut"}, {"Guide"}),
+        ("type=blogpost", {"Post"}, {"Post"}),
+        (f"space={eng}", {"Guide", "Post"}, {"Guide", "Post"}),
+        (f"space={eng} and type=page", {"Guide"}, {"Guide"}),
+        ("label=runbook", {"Guide"}, {"Guide"}),
+        ("space=NOPE", set(), set()),
+        ('title="Guide"', set(), set()),
+        (["type=page", f"space={eng}"], {"Guide", "Shut"}, {"Guide"}),
+    ]
+    with client_for(settings, reload=True) as c:
+        written = yaml.safe_load(settings.tokens_path.read_text())
+        tokens = {u["email"]: u["token"] for u in written["users"]}
+        callers = {
+            "admin": {"Authorization": f"Bearer {written['admin_token']}"},
+            "ava": {"Authorization": f"Bearer {tokens['ava@acme.com']}"},
+        }
+        for cql, admin, ava in rows:
+            for who, want in (("admin", admin), ("ava", ava)):
+                r = c.get(
+                    "/atlassian/wiki/rest/api/search", headers=callers[who], params={"cql": cql}
+                ).json()
+                assert {x["title"] for x in r["results"]} == want, (cql, who)
+                assert r["totalSize"] == len(want), (cql, who)
+
+
 def test_confluence_storage_roundtrip(client, admin_h, ro_conn):
     doc = ro_conn.execute("SELECT * FROM confluence_pages LIMIT 1").fetchone()
     cid = doc["id"]

@@ -1349,12 +1349,26 @@ async def confluence_space_get(key: str, request: Request):
 
 @router.get("/wiki/rest/api/search", response_model=ConfluenceResults, openapi_extra=_P_CQL)
 async def confluence_cql_search(request: Request):
-    """CQL search used by Confluence clients (e.g. mcp-atlassian). We parse the
-    `~ "term"` operand and do a keyword search over the ACL-visible corpus."""
+    """CQL search used by Confluence clients (e.g. mcp-atlassian). Four clauses are read: a `~`
+    operand is a keyword search over the ACL-visible corpus, and `space`, `type` and `label` filter
+    its matches, or the whole ACL-visible corpus when there is no `~`. Measured 2026-10-05 with no
+    `~`: real's `type=page` is every page on the site and `space=<KEY> and type=page` that space's
+    pages; its `space=<KEY>` also holds the space's attachments, comments and the space itself,
+    where this server answers the space's pages and blogposts. A CQL holding none of the four names
+    only fields this route does not read, and answers no row."""
     conn = auth.conn(request)
     caller = _confluence_caller(request)
     ids = auth.visible_ids(request, caller)
-    cql = _str_param(request, "cql", "") or ""
+    # Not `_confluence_page_params`: see `_cql_page_param`.
+    limit = _cql_page_param(request, "limit", 25)
+    start = _cql_page_param(request, "start", 0)
+    if limit is None or start is None:
+        return Response(status_code=404)
+    # the first value, between the 404 and the negative check: see `errors_atlassian.cql_required`
+    cqls = request.query_params.getlist("cql")
+    if not cqls or not cqls[0]:
+        raise errors_atlassian.cql_required()
+    cql = cqls[0]
     m = re.search(r'(?:text|title)\s*~\s*"?([^"~]+)"?', cql) or re.search(r'~\s*"?([^"~]+)"?', cql)
     term = m.group(1).strip() if m else ""
     # honor the common structured CQL clauses: space / type / label
@@ -1371,11 +1385,6 @@ async def confluence_cql_search(request: Request):
     want_type = mt.group(1) if mt else None
     ml = re.search(r'label\s*(?:=|in)\s*"?([^")\s]+)"?', cql)
     want_label = ml.group(1) if ml else None
-    # Not `_confluence_page_params`: see `_cql_page_param`.
-    limit = _cql_page_param(request, "limit", 25)
-    start = _cql_page_param(request, "start", 0)
-    if limit is None or start is None:
-        return Response(status_code=404)
     _refuse_negative_page_params(limit, start)
     # An empty `cursor` is none, and of a repeated one the first is read, measured 2026-10-04.
     sent_cursor = (request.query_params.getlist("cursor") or [None])[0]
@@ -1383,7 +1392,14 @@ async def confluence_cql_search(request: Request):
 
     # fetch the full ACL-visible match set, filter by the clauses, then paginate — so
     # totalSize reflects the true match count (not just the returned page).
-    everything = store.search_documents(conn, term, "confluence", ids, limit=100_000, offset=0)
+    if term:
+        everything = store.search_documents(conn, term, "confluence", ids, limit=100_000, offset=0)
+    elif space_key or want_type or want_label:
+        everything = store.list_documents(
+            conn, "confluence", container=None, visible_ids=ids, limit=100_000, offset=0
+        )
+    else:
+        everything = []
 
     def _match(r) -> bool:
         if space_unresolvable:
