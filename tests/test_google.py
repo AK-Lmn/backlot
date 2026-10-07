@@ -1384,11 +1384,51 @@ def test_drive_a_listing_that_issues_no_page_token_refuses_one(client, admin_h, 
         ([("fields", "bogus"), ("orderBy", "name,starred")], 500, None),
         ([("fields", ""), ("orderBy", "name,starred")], 500, None),
         ([("q", "name = 'no such file'"), ("orderBy", "name,starred")], 500, None),
+        (
+            [("q", "fullText contains 'the'"), ("orderBy", "name"), ("pageSize", "0")],
+            400,
+            "page_size",
+        ),
+        (
+            [("q", "fullText contains 'the'"), ("orderBy", "name"), ("pageSize", "NOPE")],
+            400,
+            None,
+        ),
+        ([("q", "fullText contains 'the'"), ("orderBy", "bogus")], 400, "orderBy"),
+        ([("q", "fullText contains 'the' and nosuchfield = 1"), ("orderBy", "name")], 400, "q"),
+        (
+            [("q", "fullText contains 'the' and nosuchfield = 1"), ("orderBy", "viewedByMeTime")],
+            400,
+            "q",
+        ),
+        (
+            [("q", "fullText contains 'the'"), ("orderBy", "name"), ("pageToken", "BOGUS")],
+            403,
+            "orderBy",
+        ),
+        (
+            [("pageToken", "BOGUS"), ("q", "fullText contains 'the'"), ("orderBy", "name")],
+            403,
+            "orderBy",
+        ),
+        (
+            [("q", "fullText contains 'the'"), ("orderBy", "name"), ("fields", "bogus")],
+            403,
+            "orderBy",
+        ),
+        (
+            [("fields", "bogus"), ("q", "fullText contains 'the'"), ("orderBy", "name")],
+            403,
+            "orderBy",
+        ),
+        ([("q", "fullText contains 'the'"), ("orderBy", "name"), ("fields", "")], 403, "orderBy"),
+        ([("fields", ""), ("q", "fullText contains 'the'"), ("orderBy", "name")], 403, "orderBy"),
     ],
 )
 def test_drive_files_list_refuses_in_reals_order(client, admin_h, query, code, location):
-    """Two values at once, refused in the order `drive_files_list`'s comment records. A `pageSize`
-    the proto layer cannot read has no `location`."""
+    """Two values at once, refused in the order `drive_files_list`'s comment records, where a `q`
+    with a `fullText` term and an `orderBy` count as one, the 403. A `pageSize` the proto layer
+    cannot read has no `location`."""
     e = _gerr(client.get("/drive/v3/files", headers=admin_h, params=query))
     assert e["code"] == code
     assert e["errors"][0].get("location") == location
@@ -1525,6 +1565,7 @@ _DRIVE_CHECK_ROWS = [
     ("/drive/v3/files", "includeItemsFromAllDrives=true&orderBy=bogus", "admin", (400, "invalid", "orderBy", None)),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&orderBy=name,name", "admin", (403, "orderByContainsDuplicateSortKeys", "orderBy", None)),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&orderBy=name,starred", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "q=fullText%20contains%20%27zzqqxx%27&orderBy=viewedByMeTime&includeItemsFromAllDrives=true", "admin", _SHARED_DRIVES),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&q=bad", "admin", _SHARED_DRIVES),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&pageToken=bad", "admin", _SHARED_DRIVES),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&fields=bad", "admin", _SHARED_DRIVES),
@@ -3024,53 +3065,89 @@ def test_drive_order_by_rejects_keys_it_cannot_honor(client, admin_h):
     assert ok.status_code == 200
 
 
+_DUPLICATE_403 = (
+    "orderByContainsDuplicateSortKeys",
+    "The orderBy parameter cannot contain duplicate sort keys.",
+)
+_FULLTEXT_403 = (
+    "forbidden",
+    "Sorting is not supported for queries with fullText terms. Results are always in descending relevance order.",
+)
+
+
 @pytest.mark.parametrize(
-    "order_by, status",
+    "q, order_by, status, error",
     [
-        ("name", 200),
-        ("name,modifiedTime", 200),
-        ("name desc,modifiedTime", 200),
-        ("recency,modifiedTime", 200),
-        ("name,name", 403),
-        ("name desc,name", 403),
-        ("name,name desc", 403),
-        ("name desc,name desc", 403),
-        ("modifiedTime,name,modifiedTime", 403),
-        ("name_natural,name", 403),
-        ("name,name_natural", 403),
-        ("name,name,bogus", 403),
-        ("name,bogus,name", 400),
-        ("name,name sideways", 400),
-        ("starred", 200),
-        ("starred desc", 200),
-        ("starred,name", 200),
-        ("starred desc,name", 200),
-        ("starred,name,folder", 200),
-        (",starred", 200),
-        ("name,starred", 500),
-        ("name, starred", 500),
-        ("name desc,starred desc", 500),
-        ("folder,starred,name", 500),
-        ("name,folder,starred", 500),
-        ("createdTime,starred", 500),
-        ("quotaBytesUsed,starred", 500),
-        ("name,,starred", 500),
-        ("name,starred,name", 403),
-        ("starred,starred", 403),
-        ("name,starred,bogus", 400),
+        (None, "name", 200, None),
+        (None, "name,modifiedTime", 200, None),
+        (None, "name desc,modifiedTime", 200, None),
+        (None, "recency,modifiedTime", 200, None),
+        (None, "name,name", 403, _DUPLICATE_403),
+        (None, "name desc,name", 403, _DUPLICATE_403),
+        (None, "name,name desc", 403, _DUPLICATE_403),
+        (None, "name desc,name desc", 403, _DUPLICATE_403),
+        (None, "modifiedTime,name,modifiedTime", 403, _DUPLICATE_403),
+        (None, "name_natural,name", 403, _DUPLICATE_403),
+        (None, "name,name_natural", 403, _DUPLICATE_403),
+        (None, "name,name,bogus", 403, _DUPLICATE_403),
+        (None, "name,bogus,name", 400, None),
+        (None, "name,name sideways", 400, None),
+        (None, "starred", 200, None),
+        (None, "starred desc", 200, None),
+        (None, "starred,name", 200, None),
+        (None, "starred desc,name", 200, None),
+        (None, "starred,name,folder", 200, None),
+        (None, ",starred", 200, None),
+        (None, "name,starred", 500, None),
+        (None, "name, starred", 500, None),
+        (None, "name desc,starred desc", 500, None),
+        (None, "folder,starred,name", 500, None),
+        (None, "name,folder,starred", 500, None),
+        (None, "createdTime,starred", 500, None),
+        (None, "quotaBytesUsed,starred", 500, None),
+        (None, "name,,starred", 500, None),
+        (None, "name,starred,name", 403, _DUPLICATE_403),
+        (None, "starred,starred", 403, _DUPLICATE_403),
+        (None, "name,starred,bogus", 400, None),
+        ("fullText contains 'the'", "name", 403, _FULLTEXT_403),
+        ("fullText contains 'the'", "name desc", 403, _FULLTEXT_403),
+        ("fullText contains 'the'", "name,modifiedTime", 403, _FULLTEXT_403),
+        ("fullText contains 'the'", "name,starred", 403, _FULLTEXT_403),
+        ("fullText contains 'the'", "name,viewedByMeTime", 403, _FULLTEXT_403),
+        ("fullText contains 'the'", "viewedByMeTime", 403, _FULLTEXT_403),
+        ("fullText contains 'the'", "viewedByMeTime desc", 403, _FULLTEXT_403),
+        ("fullText contains 'the'", "modifiedByMeTime", 403, _FULLTEXT_403),
+        ("fullText contains 'the'", "name,name", 403, _DUPLICATE_403),
+        ("fullText contains 'the'", "viewedByMeTime,viewedByMeTime", 403, _DUPLICATE_403),
+        ("fullText contains 'zzqqxx'", "name", 403, _FULLTEXT_403),
+        ("fullText contains 'zzqqxx'", None, 200, None),
+        ("fullText contains 'zzqqxx'", "", 200, None),
+        ("fullText contains 'zzqqxx' and trashed = false", "name", 403, _FULLTEXT_403),
+        ("fullText contains 'zzqqxx' or name contains 'zzqqxx'", "name", 403, _FULLTEXT_403),
+        ("not fullText contains 'the'", "name", 403, _FULLTEXT_403),
+        ("(fullText contains 'the')", "name", 403, _FULLTEXT_403),
+        ("name contains 'the'", "name", 200, None),
+        ("name contains 'fullText'", "name", 200, None),
     ],
 )
-def test_drive_order_by_refuses_a_repeated_key_and_a_starred_after_another(
-    client, admin_h, order_by, status
+def test_drive_order_by_is_refused_where_real_refuses_it(
+    client, admin_h, q, order_by, status, error
 ):
-    """A key named twice is the 403 `_drive_order_specs` describes, and `starred` after another key
-    the 500 `gerr.drive_internal_error` describes, each `error` object the one real sends. An
-    unusable token at or before the repeat is the 400, and the parse is refused ahead of the 500
-    wherever `starred` sits."""
-    r = client.get("/drive/v3/files", headers=admin_h, params={"pageSize": 1, "orderBy": order_by})
+    """`orderBy` on its own and beside a `q`, answered with the 403s `_drive_order_specs` and
+    `gerr.sorting_not_supported_fulltext` describe and the 500 `gerr.drive_internal_error`
+    describes, each `error` object the one real sends. An unusable token at or before a repeat is
+    the 400, the parse is refused ahead of the 500 wherever `starred` sits and the repeat ahead of
+    the `fullText` 403, and an absent or empty `orderBy`, or a `q` with no `fullText` term, is
+    served."""
+    params = {"pageSize": 1, "q": q, "orderBy": order_by}
+    r = client.get(
+        "/drive/v3/files",
+        headers=admin_h,
+        params={k: v for k, v in params.items() if v is not None},
+    )
     assert r.status_code == status, r.text
-    if status == 403:
-        message = "The orderBy parameter cannot contain duplicate sort keys."
+    if error is not None:
+        reason, message = error
         assert _gerr(r) == {
             "code": 403,
             "message": message,
@@ -3078,7 +3155,7 @@ def test_drive_order_by_refuses_a_repeated_key_and_a_starred_after_another(
                 {
                     "message": message,
                     "domain": "global",
-                    "reason": "orderByContainsDuplicateSortKeys",
+                    "reason": reason,
                     "location": "orderBy",
                     "locationType": "parameter",
                 }
