@@ -1378,11 +1378,17 @@ def test_drive_a_listing_that_issues_no_page_token_refuses_one(client, admin_h, 
         ([("orderBy", "name,name"), ("q", "nosuchfield = 1")], 403, "orderBy"),
         ([("pageToken", "BOGUS"), ("orderBy", "name,name")], 403, "orderBy"),
         ([("fields", "bogus"), ("orderBy", "name,name")], 403, "orderBy"),
+        ([("orderBy", "name,starred"), ("pageSize", "0")], 400, "page_size"),
+        ([("orderBy", "name,starred"), ("q", "nosuchfield = 1")], 400, "q"),
+        ([("orderBy", "name,starred"), ("pageToken", "BOGUS")], 400, "pageToken"),
+        ([("fields", "bogus"), ("orderBy", "name,starred")], 500, None),
+        ([("fields", ""), ("orderBy", "name,starred")], 500, None),
+        ([("q", "name = 'no such file'"), ("orderBy", "name,starred")], 500, None),
     ],
 )
 def test_drive_files_list_refuses_in_reals_order(client, admin_h, query, code, location):
-    """Two bad values at once, each pair in the order `drive_files_list`'s comment records. A
-    `pageSize` the proto layer cannot read has no `location`."""
+    """Two values at once, refused in the order `drive_files_list`'s comment records. A `pageSize`
+    the proto layer cannot read has no `location`."""
     e = _gerr(client.get("/drive/v3/files", headers=admin_h, params=query))
     assert e["code"] == code
     assert e["errors"][0].get("location") == location
@@ -1518,6 +1524,7 @@ _DRIVE_CHECK_ROWS = [
     ("/drive/v3/files", "includeItemsFromAllDrives=true&pageSize=0", "admin", _RANGE),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&orderBy=bogus", "admin", (400, "invalid", "orderBy", None)),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&orderBy=name,name", "admin", (403, "orderByContainsDuplicateSortKeys", "orderBy", None)),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&orderBy=name,starred", "admin", _SHARED_DRIVES),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&q=bad", "admin", _SHARED_DRIVES),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&pageToken=bad", "admin", _SHARED_DRIVES),
     ("/drive/v3/files", "includeItemsFromAllDrives=true&fields=bad", "admin", _SHARED_DRIVES),
@@ -3034,11 +3041,32 @@ def test_drive_order_by_rejects_keys_it_cannot_honor(client, admin_h):
         ("name,name,bogus", 403),
         ("name,bogus,name", 400),
         ("name,name sideways", 400),
+        ("starred", 200),
+        ("starred desc", 200),
+        ("starred,name", 200),
+        ("starred desc,name", 200),
+        ("starred,name,folder", 200),
+        (",starred", 200),
+        ("name,starred", 500),
+        ("name, starred", 500),
+        ("name desc,starred desc", 500),
+        ("folder,starred,name", 500),
+        ("name,folder,starred", 500),
+        ("createdTime,starred", 500),
+        ("quotaBytesUsed,starred", 500),
+        ("name,,starred", 500),
+        ("name,starred,name", 403),
+        ("starred,starred", 403),
+        ("name,starred,bogus", 400),
     ],
 )
-def test_drive_order_by_refuses_a_repeated_sort_key(client, admin_h, order_by, status):
-    """A key named twice is the 403 `_drive_order_specs` describes, and its `error` object is the
-    one real sends; an unusable token at or before the repeat is the 400."""
+def test_drive_order_by_refuses_a_repeated_key_and_a_starred_after_another(
+    client, admin_h, order_by, status
+):
+    """A key named twice is the 403 `_drive_order_specs` describes, and `starred` after another key
+    the 500 `gerr.drive_internal_error` describes, each `error` object the one real sends. An
+    unusable token at or before the repeat is the 400, and the parse is refused ahead of the 500
+    wherever `starred` sits."""
     r = client.get("/drive/v3/files", headers=admin_h, params={"pageSize": 1, "orderBy": order_by})
     assert r.status_code == status, r.text
     if status == 403:
@@ -3054,6 +3082,14 @@ def test_drive_order_by_refuses_a_repeated_sort_key(client, admin_h, order_by, s
                     "location": "orderBy",
                     "locationType": "parameter",
                 }
+            ],
+        }
+    if status == 500:
+        assert _gerr(r) == {
+            "code": 500,
+            "message": "Internal Error",
+            "errors": [
+                {"message": "Internal Error", "domain": "global", "reason": "internalError"}
             ],
         }
 

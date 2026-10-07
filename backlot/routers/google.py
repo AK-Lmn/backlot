@@ -1795,6 +1795,14 @@ def _drive_sort(files: list[dict], specs: list[tuple]) -> list[dict]:
     return files
 
 
+def _drive_starred_after_another_key(order_by: str | None) -> bool:
+    """Whether ``starred`` follows another key in an ``orderBy`` that ``_drive_order_specs`` passed,
+    the case `gerr.drive_internal_error` answers. An empty token is no key: `,starred` is served and
+    `name,,starred` is the 500."""
+    keys = [parts[0] for tok in (order_by or "").split(",") if (parts := tok.split())]
+    return "starred" in keys[1:]
+
+
 def _drive_q_plain_folder(query) -> bool:
     """True when the query is just a folder scope (``'<id>' in parents``, and the ``trashed =
     false`` every query carries) with no other clause — the shape a tree-walking client sends,
@@ -2100,8 +2108,9 @@ async def drive_files_list(request: Request):
     # Each read off the first repeat, as real reads them -- see `gerr.first_repeat`. Refused in
     # real's order, measured 2026-09-23 by sending two bad values at once: `pageSize` first, then
     # `orderBy`, `q`, `pageToken` and `fields`, whichever order the query names them in. The 403 for
-    # an `orderBy` naming a key twice comes at the same point, measured 2026-10-05, and the
-    # shared-drive 403 between `orderBy` and `q`, measured 2026-10-04.
+    # an `orderBy` naming a key twice comes at the same point, measured 2026-10-05, the shared-drive
+    # 403 between `orderBy` and `q`, measured 2026-10-04, and the 500 for `starred` after another
+    # key between `pageToken` and `fields`, measured 2026-10-04 and 2026-10-07.
     params = request.query_params
     typed = _drive_typed(
         request,
@@ -2128,6 +2137,8 @@ async def drive_files_list(request: Request):
     offset = decode_cursor_or_none(gerr.first_repeat(params, "pageToken"))
     if offset is None:
         raise gerr.invalid_value("pageToken")
+    if _drive_starred_after_another_key(gerr.first_repeat(params, "orderBy")):
+        raise gerr.drive_internal_error()
     mask = gerr.first_repeat(params, "fields")
     if mask is not None and not mask.strip():
         # The blank mask `_drive_get_field_keys` describes; on a listing it drops `kind` and

@@ -337,6 +337,13 @@ def internal_error() -> GoogleError:
     return GoogleError(500, "Internal error encountered.", reason="backendError", status="INTERNAL")
 
 
+def drive_internal_error() -> GoogleError:
+    """Drive's 500 `Internal Error`, which `files.list` answers to an ``orderBy`` naming ``starred``
+    second or third, after each of the other ten documented keys and in either direction, while
+    ``starred`` first is served. Measured against Drive v3 on 2026-10-04 and 2026-10-07."""
+    return GoogleError(500, "Internal Error", reason="internalError")
+
+
 def unsupported_conversion() -> GoogleError:
     """`files.export` asked for a format the file's type does not export to. Measured 2026-09-23
     on a spreadsheet: `text/plain`, `bogus/type`, a native Google type, a padded `text/csv `,
