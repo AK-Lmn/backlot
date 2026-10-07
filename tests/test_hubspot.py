@@ -29,6 +29,27 @@ def test_admin_hubspot_crawls_all(client, admin_h, ro_conn):
     assert all(r["archived"] is True for r in archived)
 
 
+def test_hubspot_repeated_archived_param_reads_first_value(client, admin_h):
+    """Real HubSpot reads the first `archived` value when repeated on an object listing,
+    whereas Starlette's query_params.get returns the last value (#518)."""
+    # First value is true, second is false -> should return archived records
+    resp_true_first = client.get(
+        "/hubspot/crm/v3/objects/companies?archived=true&archived=false",
+        headers=admin_h,
+    ).json()
+    assert len(resp_true_first["results"]) == 1
+    assert resp_true_first["results"][0]["properties"]["name"] == "Defunct Labs"
+
+    # First value is false, second is true -> should return active records
+    resp_false_first = client.get(
+        "/hubspot/crm/v3/objects/companies?archived=false&archived=true",
+        headers=admin_h,
+    ).json()
+    assert len(resp_false_first["results"]) == 3
+    assert all(r["archived"] is False for r in resp_false_first["results"])
+
+
+
 def test_hubspot_list_cursor_pages_without_overlap(client, admin_h):
     """The cursor path itself: pages of two over the three non-archived companies, no repeats, no
     gaps, and the walk ends by `paging.next` disappearing rather than by a page coming back empty."""

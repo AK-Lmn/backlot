@@ -759,7 +759,7 @@ async def list_objects(object_type: str, request: Request):
         after_id=after_doc,
         visible_ids=auth.visible_ids(request, caller),
         limit=limit + 1,
-        archived=_flag(qp.get("archived")),
+        archived=_flag((qp.getlist("archived") or [None])[0]),
     )
     return _page(rows, limit, _keep(qp.get("properties")))
 
