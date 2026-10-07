@@ -55,8 +55,20 @@ class _ALoose(BaseModel):
 
 class JiraServerInfo(_ALoose):
     baseUrl: str
+    displayUrl: str
+    displayUrlServicedeskHelpCenter: str
+    displayUrlCSMHelpSeeker: str
+    displayUrlConfluence: str
     version: str
+    versionNumbers: list[int]
     deploymentType: str = "Cloud"
+    buildNumber: int
+    buildDate: str
+    serverTime: str | None = None
+    scmInfo: str
+    serverTitle: str
+    defaultLocale: dict
+    serverTimeZone: str
 
 
 class JiraSearchResult(_ALoose):
@@ -294,9 +306,15 @@ def _resolve_jira_key(request: Request, conn, key: str, ids):
 
 
 @router.get(
-    "/rest/api/2/serverInfo", response_model=JiraServerInfo
+    "/rest/api/2/serverInfo",
+    response_model=JiraServerInfo,
+    response_model_exclude_none=True,
 )  # jira PyPI client probes this on connect
-@router.get("/rest/api/3/serverInfo", response_model=JiraServerInfo)
+@router.get(
+    "/rest/api/3/serverInfo",
+    response_model=JiraServerInfo,
+    response_model_exclude_none=True,
+)
 async def jira_server_info(request: Request):
     """The members Jira Cloud answers, the same on v2 and v3 (measured 2026-10-03, 2026-10-05 and
     2026-10-07).
@@ -317,8 +335,8 @@ async def jira_server_info(request: Request):
         "baseUrl": site,
         "displayUrl": site,
         "displayUrlServicedeskHelpCenter": site,
-        "displayUrlConfluence": site,
         "displayUrlCSMHelpSeeker": site,
+        "displayUrlConfluence": site,
         "version": "1001.0.0-SNAPSHOT",
         "versionNumbers": [1001, 0, 0],
         "deploymentType": "Cloud",
