@@ -2077,6 +2077,7 @@ async def drive_shared_drives(request: Request):
     _drive_page_size_in_range(
         _drive_typed(request, "useDomainAdminAccess", page_size=True)["pageSize"], 100
     )
+    _drive_listing_page_token(request)
     # Every caller here is a member of one Workspace domain and none is its administrator: a
     # member's 403, with a `q` sent and without one, on its own and in a batch, measured 2026-10-06.
     # Real answers a domain administrator 200 and a consumer account 400 at `q`.
@@ -2312,6 +2313,7 @@ async def drive_files_permissions(file_id: str, request: Request):
         request, "supportsAllDrives", "supportsTeamDrives", "useDomainAdminAccess", page_size=True
     )["pageSize"]
     _drive_page_size_in_range(sizes, 100)
+    _drive_listing_page_token(request, expired_empty=True)
     # No caller here is a domain administrator: 404 for the file, even one the caller owns,
     # measured 2026-10-04 on a consumer account and 2026-10-06 on a Workspace member.
     if _drive_true(request, "useDomainAdminAccess"):
@@ -4463,6 +4465,33 @@ def _drive_page_size_in_range(sizes: list[int], top: int) -> None:
             f"Invalid value '{sizes[0]}'. Values must be within the range: [value: 1\n, value: "
             f"{top}\n]",
         )
+
+
+def _drive_listing_page_token(request: Request, *, expired_empty: bool = False) -> None:
+    """Refuse a `pageToken` sent to a listing that issues no `nextPageToken`, where every token is
+    one it did not issue: `permissions.list`, which serves a file's whole sharing on one page, and
+    `drives.list`, which is empty. Presence is the whole test: `decode_cursor_or_none`, which
+    `files.list` calls, reads `bzow` and that route's own tokens as offsets. Read from the first
+    repeat, after the typed and range refusals and ahead of the `useDomainAdminAccess=true` refusal
+    and `permissions.list`'s file lookup. Measured 2026-10-04 and 2026-10-05, and the empty, `bad`,
+    `bzow`, `BOGUS` and issued-token cells again on 2026-10-07 as a Workspace member::
+
+        pageToken                         permissions.list          drives.list
+        --------------------------------|-------------------------|-------------------------
+        empty                           | 403 `pageTokenExpired`  | the first page
+        `bad`, `bzow`, `AAAA`           | 400 `Invalid Value`     | 400 `Invalid Value`
+        `BOGUS`, `0`, `a`, a space, a   | 500 `Unknown Error.`    | 400 `Invalid Value`
+        token `files.list` issued       |                         |
+
+    ``expired_empty`` asks for the empty row's 403, which only `permissions.list` answers. The 500
+    is not modelled; those tokens get the 400 here too."""
+    token = gerr.first_repeat(request.query_params, "pageToken")
+    if token is None:
+        return
+    if not token and expired_empty:
+        raise gerr.page_token_expired()
+    if token:
+        raise gerr.invalid_value("pageToken")
 
 
 def _drive_page_size(sizes: list[int]) -> int:

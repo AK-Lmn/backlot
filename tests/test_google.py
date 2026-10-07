@@ -1295,6 +1295,71 @@ def test_drive_a_page_token_it_did_not_issue_is_refused(client, admin_h):
     assert token.status_code == 200 and token.json()["files"] != first["files"]
 
 
+_PERMS = "/drive/v3/files/{doc}/permissions"
+_TOKEN_INVALID = {
+    "code": 400,
+    "message": "Invalid Value",
+    "errors": [
+        {
+            "message": "Invalid Value",
+            "domain": "global",
+            "reason": "invalid",
+            "location": "pageToken",
+            "locationType": "parameter",
+        }
+    ],
+}
+_TOKEN_EXPIRED = {
+    "code": 403,
+    "message": "The specified page token has expired, and can no longer be used.",
+    "errors": [
+        {
+            "message": "The specified page token has expired, and can no longer be used.",
+            "domain": "global",
+            "reason": "pageTokenExpired",
+        }
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    "path, query, error",
+    [
+        *[
+            (path, query, error)
+            for path in (_PERMS, "/drive/v3/drives")
+            for query, error in [
+                ([("pageToken", "bad")], _TOKEN_INVALID),
+                ([("pageToken", "bzow")], _TOKEN_INVALID),
+                ([("useDomainAdminAccess", "true"), ("pageToken", "bad")], _TOKEN_INVALID),
+                ([("pageToken", "bad"), ("useDomainAdminAccess", "true")], _TOKEN_INVALID),
+                ([("pageToken", "bad"), ("pageSize", "0")], None),
+                ([("pageToken", "bad"), ("useDomainAdminAccess", "NOPE")], None),
+            ]
+        ],
+        (_PERMS, [("pageToken", "")], _TOKEN_EXPIRED),
+        (_PERMS, [("useDomainAdminAccess", "true"), ("pageToken", "")], _TOKEN_EXPIRED),
+        ("/drive/v3/files/nosuchfileid000000/permissions", [("pageToken", "")], _TOKEN_EXPIRED),
+        ("/drive/v3/drives", [("pageToken", "{token}")], _TOKEN_INVALID),
+        ("/drive/v3/drives", [("pageToken", "")], None),
+        ("/drive/v3/drives", [("useDomainAdminAccess", "true"), ("pageToken", "")], None),
+    ],
+)
+def test_drive_a_listing_that_issues_no_page_token_refuses_one(client, admin_h, path, query, error):
+    """The rule `_drive_listing_page_token` records, one request per row. `None` is a token that
+    changes nothing: the answer is the one the request gets without it, a page or the refusal of
+    the value beside it. `{token}` is filled from the first page of `files.list`."""
+    url = path.format(doc=_drive_find(client, admin_h, "Brand")["id"])
+    issued = client.get("/drive/v3/files", headers=admin_h, params={"pageSize": 1}).json()
+    query = [(k, v.format(token=issued["nextPageToken"])) for k, v in query]
+    r = client.get(url, headers=admin_h, params=query)
+    if error is None:
+        without = [(k, v) for k, v in query if k != "pageToken"]
+        assert r.content == client.get(url, headers=admin_h, params=without).content
+    else:
+        assert (r.status_code, _gerr(r)) == (error["code"], error)
+
+
 @pytest.mark.parametrize(
     "query, code, location",
     [
@@ -1528,6 +1593,7 @@ def test_drive_answers_each_check_with_reals_status_and_reason(
         ("/drive/v3/files/{id}", "acknowledgeAbuse=NOPE", None, None),
         ("/drive/v3/files/{id}/permissions", "supportsAllDrives=NOPE", None, None),
         ("/drive/v3/files/{id}/permissions", "pageSize=0", None, None),
+        ("/drive/v3/files/{id}/permissions", "pageToken=bad", None, None),
         ("/sheets/v4/spreadsheets/{id}/values/Sheet1!A1", "majorDimension=NOPE", None, None),
         ("/sheets/v4/spreadsheets/{id}/values:batchGet", "valueRenderOption=NOPE", None, None),
         ("/sheets/v4/spreadsheets/{id}", "includeGridData=NOPE", None, None),
@@ -2324,6 +2390,8 @@ REPEATED = [
     ("GET", _FILES, {}, "pageSize", "1", "3", "first", _ids),
     ("GET", _FILES, {"pageSize": "1"}, "pageToken", "{token}", "BOGUS", "first", _ids),
     ("GET", _FILES, {"pageSize": "1"}, "pageToken", "", "{token}", "first", _ids),
+    ("GET", _FILES + "/{sid}/permissions", {}, "pageToken", "", "bad", "first", _keys),
+    ("GET", "/drive/v3/drives", {}, "pageToken", "", "bad", "first", _keys),
     ("GET", _FILES, {"pageSize": "3"}, "orderBy", "name", "name desc", "first", _names),
     ("GET", _FILES, {"pageSize": "3"}, "orderBy", "name", "bogus", "first", _names),
     (

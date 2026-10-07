@@ -165,6 +165,15 @@ def invalid_value(param: str, message: str | None = None) -> GoogleError:
     return GoogleError(400, message or "Invalid Value", reason="invalid", location=param)
 
 
+def page_token_expired() -> GoogleError:
+    """Drive's 403 for a page token it calls expired, which carries no `location`."""
+    return GoogleError(
+        403,
+        "The specified page token has expired, and can no longer be used.",
+        reason="pageTokenExpired",
+    )
+
+
 def duplicate_sort_keys() -> GoogleError:
     """Drive's refusal of an ``orderBy`` that names one sort key twice — a 403, not a 400, measured
     against Drive v3 on 2026-10-03 and 2026-10-04."""
@@ -494,6 +503,8 @@ def first_repeat(query: Mapping[str, str] | None, name: str) -> str | None:
         pageSize          | `1&3` is one file                    | Drive files.list 2026-09-23
         pageToken         | `<valid>&BOGUS` is the next page,    | Drive files.list 2026-09-23
                           | `BOGUS&<valid>` a 400                |
+                          | `&bad` is what an empty token gets,  | Drive permissions.list and
+                          | `bad&` a 400                         | drives.list 2026-10-05
         orderBy           | `name&name desc` ascends             | Drive files.list 2026-09-23
         mimeType          | `text/csv&text/tab-separated-values` | Drive files.export 2026-09-23
                           | answers CSV                          |
