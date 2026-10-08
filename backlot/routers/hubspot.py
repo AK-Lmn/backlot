@@ -165,6 +165,16 @@ def _flag(raw) -> bool:
     return str(raw or "").lower() == "true"
 
 
+def _first_query(qp, name: str):
+    """The first value the query carries for ``name``, or ``None`` when it carries none.
+    Real reads a repeated `archived` on an object listing from its first value, measured against
+    api.hubapi.com (2026-10-07, 2026-10-08): `archived=true&archived=false` serves the archived
+    view, and `archived=false&archived=true`, `archived=&archived=true` and
+    `archived=yes&archived=true` the active one. Starlette's `QueryParams.get` returns the last."""
+    values = qp.getlist(name)
+    return values[0] if values else None
+
+
 def _props(row) -> dict:
     return store.jcol(row, "properties", {}) or {}
 
@@ -763,7 +773,7 @@ async def list_objects(object_type: str, request: Request):
         after_id=after_doc,
         visible_ids=auth.visible_ids(request, caller),
         limit=limit + 1,
-        archived=_flag(qp.get("archived")),
+        archived=_flag(_first_query(qp, "archived")),
     )
     return _page(rows, limit, _keep(qp.get("properties")))
 
