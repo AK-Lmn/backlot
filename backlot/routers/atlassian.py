@@ -323,8 +323,8 @@ async def jira_server_info(request: Request):
     """The members Jira Cloud answers, the same on v2 and v3 (measured 2026-10-03, 2026-10-05 and
     2026-10-07).
 
-    A signed-in caller gets fifteen, in the order `JiraServerInfo` declares them. The
-    anonymous caller `_jira_caller` returns gets the other fourteen: measured with no
+    A signed-in caller gets fifteen, in the order `JiraServerInfo` declares them. The anonymous
+    caller `_jira_caller` returns gets all of them but `serverTime`: measured with no
     `Authorization` header, a failed `email:api_token` pair, an empty password, a Basic value that
     is not base64 and an unknown scheme. `serverTime` is milliseconds and a `+HHMM` offset, the form
     of `buildDate` (`synth.jira_datetime`). The offset is the tenant's own and not read from
