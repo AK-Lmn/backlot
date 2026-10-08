@@ -53,6 +53,10 @@ class _ALoose(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+# Every member `jira_server_info` answers, declared in the order Jira Cloud answers them: the
+# response is written in declaration order whatever order the handler's dict has. `serverTime`,
+# absent for the anonymous caller, falls back to `None`, which the routes'
+# `response_model_exclude_none` leaves out.
 class JiraServerInfo(_ALoose):
     baseUrl: str
     displayUrl: str
@@ -319,7 +323,7 @@ async def jira_server_info(request: Request):
     """The members Jira Cloud answers, the same on v2 and v3 (measured 2026-10-03, 2026-10-05 and
     2026-10-07).
 
-    A signed-in caller gets fifteen, with `serverTime` between `buildDate` and `scmInfo`. The
+    A signed-in caller gets fifteen, in the order `JiraServerInfo` declares them. The
     anonymous caller `_jira_caller` returns gets the other fourteen: measured with no
     `Authorization` header, a failed `email:api_token` pair, an empty password, a Basic value that
     is not base64 and an unknown scheme. `serverTime` is milliseconds and a `+HHMM` offset, the form
