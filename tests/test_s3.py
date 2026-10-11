@@ -3191,6 +3191,36 @@ def test_boto3_reads_a_buckets_configuration_and_an_objects_and_gets_one_client_
     assert s3.get_object(Bucket=bucket, Key=key)["Body"].read() == OBJECT_TEXT
 
 
+def test_s3_object_get_and_head_carries_server_side_encryption(live_server):
+    """The default encryption header ``backlot.routers.s3.object_get`` sends on every 200 and
+    206, which botocore surfaces as ServerSideEncryption."""
+    from botocore.exceptions import ClientError
+
+    s3 = _boto3_client(live_server)
+    bucket, key = "eng-artifacts", "runbooks/oncall.md"
+    head = s3.head_object(Bucket=bucket, Key=key)
+    assert head.get("ServerSideEncryption") == "AES256"
+    assert head["ResponseMetadata"]["HTTPHeaders"]["x-amz-server-side-encryption"] == "AES256"
+
+    get = s3.get_object(Bucket=bucket, Key=key)
+    assert get.get("ServerSideEncryption") == "AES256"
+    assert get["ResponseMetadata"]["HTTPHeaders"]["x-amz-server-side-encryption"] == "AES256"
+
+    ranged = s3.get_object(Bucket=bucket, Key=key, Range="bytes=0-3")
+    assert ranged.get("ServerSideEncryption") == "AES256"
+    assert ranged["ResponseMetadata"]["HTTPHeaders"]["x-amz-server-side-encryption"] == "AES256"
+
+    part = s3.get_object(Bucket=bucket, Key=key, PartNumber=1)
+    assert part.get("ServerSideEncryption") == "AES256"
+    assert part["ResponseMetadata"]["HTTPHeaders"]["x-amz-server-side-encryption"] == "AES256"
+
+    with pytest.raises(ClientError) as exc:
+        s3.get_object(Bucket=bucket, Key="no-such-key.md")
+    assert (
+        "x-amz-server-side-encryption" not in exc.value.response["ResponseMetadata"]["HTTPHeaders"]
+    )
+
+
 # --- what real checks of a write before it performs it -----------------------------------------
 
 
