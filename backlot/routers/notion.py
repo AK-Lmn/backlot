@@ -402,7 +402,8 @@ def _user_obj(conn, email: str) -> dict:
         "type": "person",
         "name": name,
         "avatar_url": None,
-        "person": {"email": email},
+        # A person's email is verified (measured 2026-10-09 against api.notion.com).
+        "person": {"email": email, "email_verified": True},
     }
 
 
