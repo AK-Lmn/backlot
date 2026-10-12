@@ -1802,6 +1802,8 @@ async def object_get(request: Request, bucket: str, key: str):
     caller, visible, err = _auth(request)
     if err:
         return err
+    if caller.is_anonymous and any(param in q for param in _RESPONSE_OVERRIDES):
+        return _head(400) if head else _error("InvalidRequest", _ANONYMOUS_RESPONSE_OVERRIDES)
     conn = auth.conn(request)
     if not _bucket_visible(conn, bucket, visible):
         return _head(404) if head else _no_such_bucket(bucket)
@@ -1894,6 +1896,10 @@ async def object_get(request: Request, bucket: str, key: str):
     # "; charset=utf-8" to any bare text/* media_type, but a real S3 object's Content-Type is
     # returned byte-for-byte as stored — no charset ever added.
     headers["Content-Type"] = ctype
+    # Response header overrides (measured 2026-10-11).
+    for param, header_name in _RESPONSE_OVERRIDES.items():
+        if param in q:
+            headers[header_name] = _first(q, param)
 
     rng = request.headers.get("range")
     status, start, end = 200, 0, total - 1
@@ -1934,6 +1940,17 @@ async def object_get(request: Request, bucket: str, key: str):
 
 _BAD_VERSION = "Invalid version id specified"
 _BAD_CHECKSUM_MODE = "Value for x-amz-checksum-mode header is invalid."
+_ANONYMOUS_RESPONSE_OVERRIDES = (
+    "Request specific response headers cannot be used for anonymous GET requests."
+)
+_RESPONSE_OVERRIDES = {
+    "response-content-type": "Content-Type",
+    "response-content-language": "Content-Language",
+    "response-expires": "Expires",
+    "response-cache-control": "Cache-Control",
+    "response-content-disposition": "Content-Disposition",
+    "response-content-encoding": "Content-Encoding",
+}
 _MAX_PARTS = 10000
 _NO_ATTRIBUTES = (
     "The x-amz-object-attributes header specifying the attributes to be retrieved is either "

@@ -3191,6 +3191,90 @@ def test_boto3_reads_a_buckets_configuration_and_an_objects_and_gets_one_client_
     assert s3.get_object(Bucket=bucket, Key=key)["Body"].read() == OBJECT_TEXT
 
 
+def test_s3_object_get_and_head_response_header_overrides(live_server):
+    """The response header overrides ``backlot.routers.s3.object_get`` answers on an object GET
+    or HEAD."""
+    from datetime import datetime, timezone
+
+    import httpx
+
+    s3 = _boto3_client(live_server)
+    bucket, key = "eng-artifacts", "runbooks/oncall.md"
+    original_ct = s3.head_object(Bucket=bucket, Key=key)["ContentType"]
+    expires_dt = datetime(2094, 12, 1, 16, 0, tzinfo=timezone.utc)
+
+    # 1. GET with all six response-* overrides
+    r = s3.get_object(
+        Bucket=bucket,
+        Key=key,
+        ResponseContentType="text/csv",
+        ResponseCacheControl="no-cache",
+        ResponseContentDisposition='attachment; filename="x.txt"',
+        ResponseContentLanguage="ko",
+        ResponseContentEncoding="gzip",
+        ResponseExpires=expires_dt,
+    )
+    headers = r["ResponseMetadata"]["HTTPHeaders"]
+    assert r["ContentType"] == "text/csv"
+    assert headers["content-type"] == "text/csv"
+    assert r["CacheControl"] == "no-cache"
+    assert headers["cache-control"] == "no-cache"
+    assert r["ContentDisposition"] == 'attachment; filename="x.txt"'
+    assert headers["content-disposition"] == 'attachment; filename="x.txt"'
+    assert r["ContentLanguage"] == "ko"
+    assert headers["content-language"] == "ko"
+    assert r["ContentEncoding"] == "gzip"
+    assert headers["content-encoding"] == "gzip"
+    assert "expires" in headers
+
+    # 2. HEAD with overrides
+    head = s3.head_object(
+        Bucket=bucket,
+        Key=key,
+        ResponseContentType="text/csv",
+        ResponseCacheControl="no-cache",
+        ResponseContentDisposition='attachment; filename="x.txt"',
+    )
+    h_headers = head["ResponseMetadata"]["HTTPHeaders"]
+    assert h_headers["content-type"] == "text/csv"
+    assert h_headers["cache-control"] == "no-cache"
+    assert h_headers["content-disposition"] == 'attachment; filename="x.txt"'
+
+    # 3. 206 partial range with override
+    ranged = s3.get_object(
+        Bucket=bucket, Key=key, Range="bytes=0-3", ResponseContentType="text/csv"
+    )
+    assert ranged["ResponseMetadata"]["HTTPStatusCode"] == 206
+    assert ranged["ContentType"] == "text/csv"
+
+    # 4. Raw HTTP requests: case sensitivity and empty value
+    base_url, settings = live_server
+    token = settings.admin_token
+
+    # Query matching is case-sensitive: Response-Content-Type does not override Content-Type
+    mismatched = _signed(base_url, f"/s3/{bucket}/{key}?Response-Content-Type=text/csv", token)
+    assert mismatched.status_code == 200
+    assert mismatched.headers["content-type"] == original_ct
+
+    # Empty value gives empty Content-Type
+    empty_ct = _signed(base_url, f"/s3/{bucket}/{key}?response-content-type=", token)
+    assert empty_ct.status_code == 200
+    assert empty_ct.headers["content-type"] == ""
+
+    # 5. Anonymous request with response-* override is refused with 400 InvalidRequest
+    anon_get = httpx.get(f"{base_url}/s3/{bucket}/{key}?response-content-type=text/csv")
+    assert anon_get.status_code == 400
+    assert "<Code>InvalidRequest</Code>" in anon_get.text
+    assert (
+        "Request specific response headers cannot be used for anonymous GET requests."
+        in anon_get.text
+    )
+
+    anon_head = httpx.head(f"{base_url}/s3/{bucket}/{key}?response-content-type=text/csv")
+    assert anon_head.status_code == 400
+    assert anon_head.content == b""
+
+
 # --- what real checks of a write before it performs it -----------------------------------------
 
 
