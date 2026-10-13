@@ -910,8 +910,8 @@ def test_notion_user_and_block_shape(tmp_path):
     conn = _notion_conn(tmp_path)
     u = _user_obj(conn, "ava@acme.com")
     assert u["object"] == "user" and u["type"] == "person"
-    assert u["person"]["email"] == "ava@acme.com"
-    assert u["person"]["email_verified"] is True
+    assert list(u["person"]) == ["email", "email_verified"]
+    assert u["person"]["email"] == "ava@acme.com" and u["person"]["email_verified"] is True
     assert u["id"] == synth.notion_user_id("ava@acme.com")
     blocks = synth.notion_blocks("nf-page", "# On-call\n\nRoll back and page.")
     b = blocks[0]

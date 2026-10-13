@@ -402,8 +402,9 @@ def _user_obj(conn, email: str) -> dict:
         "type": "person",
         "name": name,
         "avatar_url": None,
-        # Real sends `email_verified` beside the email under each Notion-Version, `true` for the one
-        # person measured (2026-10-13). The corpus records no verification, so every person has it.
+        # Real's person member is `email` then `email_verified` under each Notion-Version, the
+        # latter `true` for the one person measured (2026-10-13). The corpus records no
+        # verification, so every person is served `true`.
         "person": {"email": email, "email_verified": True},
     }
 
